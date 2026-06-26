@@ -1,0 +1,33 @@
+name: weekly-intel-run
+
+on:
+  schedule:
+    - cron: "0 13 * * 1"   # Mondays 13:00 UTC
+  workflow_dispatch: {}      # manual trigger from the Actions tab
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv pip install --system crewai crewai-tools anthropic supabase requests python-dotenv
+
+      - name: Run weekly crew
+        env:
+          ANTHROPIC_API_KEY:    ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:         ${{ secrets.SUPABASE_KEY }}
+          TWITCH_CLIENT_ID:     ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          RAWG_API_KEY:         ${{ secrets.RAWG_API_KEY }}
+          STEAM_API_KEY:        ${{ secrets.STEAM_API_KEY }}
+        run: python run_weekly.py
