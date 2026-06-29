@@ -72,8 +72,13 @@ orchestrator = Agent(
 # ---------------------------------------------------------------------------
 
 task_market = Task(
-    description="Return the string OK. (Placeholder — real player-metric collection added in Phase 2.)",
-    expected_output="OK",
+    description=(
+        "Player metric data (CCU, review scores, review velocity) has already been collected "
+        "by the market_player worker module and written to the player_metrics table for today. "
+        "Confirm that data collection completed successfully. "
+        "(Signal interpretation and anomaly detection added in Phase 4 synthesis.)"
+    ),
+    expected_output="Market & player data collection complete.",
     agent=market_player,
 )
 
