@@ -1,3 +1,4 @@
+import re
 import time
 import requests
 from typing import Optional
@@ -27,6 +28,35 @@ def search_game(api_key: str, title: str, year: Optional[int] = None) -> Optiona
         if r.get("name", "").lower().strip() == norm:
             return _parse(r)
     return _parse(results[0])
+
+
+def get_steam_app_id(api_key: str, rawg_slug: str) -> Optional[str]:
+    """
+    Fetch the RAWG /games/{slug}/stores endpoint and extract the Steam app ID.
+    The main detail endpoint returns empty URLs; only the /stores sub-endpoint
+    has the actual store URLs.
+    Returns the app ID string (e.g. "730") or None if not found.
+    """
+    time.sleep(3.0)
+    try:
+        resp = requests.get(
+            f"{RAWG_BASE}/games/{rawg_slug}/stores",
+            params={"key": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results") or []
+    except Exception:
+        return None
+
+    for entry in results:
+        # store_id 1 = Steam in the RAWG taxonomy
+        if entry.get("store_id") == 1:
+            url = entry.get("url", "")
+            match = re.search(r"/app/(\d+)", url)
+            if match:
+                return match.group(1)
+    return None
 
 
 def _parse(raw: dict) -> dict:

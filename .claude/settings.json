@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell($env:Path = \"C:\\\\Users\\\\dadia\\\\.local\\\\bin;$env:Path\"; Set-Location \"c:\\\\Users\\\\dadia\\\\OneDrive\\\\Desktop\\\\Games-Industry-Investment-Project\"; uv pip install crewai crewai-tools anthropic supabase requests python-dotenv)"
+    ]
+  }
+}

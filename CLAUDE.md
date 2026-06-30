@@ -1,3 +1,7 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Games Industry Investment Intelligence Platform
 
 ## Project Overview
@@ -5,8 +9,10 @@ A multi-agent investment intelligence system that monitors the games industry ac
 
 **Core thesis:** Game-level data (player counts, sentiment, patch cadence, studio hiring) leads financial performance. Traditional investors underweight it.
 
-Full design: `docs/games-investment-platform-brief.md`  
-Agent internals: `docs/agent-components-plan.md`
+Full design: `project context files/games-investment-platform-brief.md`  
+Agent internals: `project context files/agent-components-plan.md`  
+Reddit adapter design: `project context files/reddit_source_adapter.md`  
+Supabase cache design: `project context files/supabase_reddit_cache.md`
 
 ---
 
@@ -27,7 +33,7 @@ agents/
   orchestrator/       Lead orchestrator that dispatches workers
   workers/            Specialized data-collection subagents
     market_player/    Steam/IGDB/RAWG engagement metrics
-    sentiment/        Reddit/X/YouTube/Steam review sentiment
+    sentiment/        Reddit/Steam review sentiment (VADER + Claude ABSA)
     patch_notes/      Update cadence analysis
     studio_intel/     Job postings, press releases, SEC filings
     financial_overlay/ yfinance + SEC EDGAR equity mapping
@@ -37,9 +43,10 @@ agents/
   skills/             SKILL.md files (progressive disclosure)
 database/
   schema.sql          Supabase table definitions
-  migrations/         Incremental schema changes
+  migrations/         Incremental schema changes (apply in Supabase SQL Editor)
+scripts/              One-off maintenance scripts (rawg_backfill.py, etc.)
 dashboard/            Next.js frontend (scaffolded in Phase 6)
-docs/                 Planning and design documents
+project context files/ Planning and design documents
 .github/workflows/    GitHub Actions cron pipelines
 ```
 
@@ -48,19 +55,15 @@ docs/                 Planning and design documents
 ## Build Phases
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Foundation + Watchlist Seeding | **In progress** |
-| 2 | Sentiment Layer | Planned |
-| 3 | Studio & Financial Intelligence | Planned |
+| 1 | Foundation + Watchlist Seeding | **Complete** |
+| 2 | Sentiment Layer | **In progress** |
+| 3 | Studio & Financial Intelligence | Partially built |
 | 4 | Synthesis Agent & Briefing | Planned |
 | 5 | Discovery Agent | Planned |
 | 6 | Dashboard Polish | Planned |
 | 7 | Portfolio Manager + Alpaca Execution | Planned |
 
-**Phase 1 checklist:**
-- [ ] Supabase project created, schema applied
-- [ ] Watchlist seeding agent (IGDB + RAWG + Steam → 150–300 games)
-- [ ] CrewAI crew scaffolded with placeholder agents
-- [ ] GitHub Actions weekly cron trigger wired
+See `tasks.md` for per-phase checklists and current status.
 
 ---
 
@@ -74,8 +77,10 @@ Copy `.env.example` to `.env`. Required per phase:
 - `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`
 - `RAWG_API_KEY`
 
+**Phase 2 (sentiment worker):**
+- `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT` — required for PRAW Reddit client; worker degrades to Steam-only if missing
+
 **Later phases:**
-- `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`
 - `X_BEARER_TOKEN`
 - `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`
 - `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`
@@ -89,7 +94,7 @@ Always lock the model per-agent in config; never default to the most capable.
 |---|---|---|
 | Opus-class | claude-opus-4-8 | Synthesis Agent, Portfolio Manager |
 | Sonnet-class | claude-sonnet-4-6 | All data worker subagents |
-| Haiku-class | claude-haiku-4-5-20251001 | Classification, formatting, trivial steps |
+| Haiku-class | claude-haiku-4-5-20251001 | Classification, formatting, trivial steps (ABSA) |
 
 ---
 
@@ -100,16 +105,37 @@ Always lock the model per-agent in config; never default to the most capable.
 4. **Execution subagent has Alpaca tools only** — tool restriction is the primary safety guardrail
 5. **All trade execution requires `status = 'approved'` in Supabase** — enforced by a `before-tool-call` lifecycle hook as belt-and-suspenders
 
+### Sentiment pipeline internals (`agents/workers/sentiment/`)
+The sentiment worker runs a two-pass pipeline per game:
+- **VADER baseline** (`vader_scorer.py`) — deterministic rule-based polarity score over all texts, returns a 1–10 float
+- **ABSA** (`absa_client.py`) — Claude Haiku extracts aspect→polarity pairs (e.g. `monetization → negative`); skipped if fewer than 5 texts; top 3 aspects returned
+- **Divergence check** (`divergence.py`) — compares text sentiment against last known player metrics; sets `divergence_flag` if significant gap
+- **Reddit client** (`reddit_client.py`) — PRAW OAuth (requires `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`); gracefully skips Reddit and runs Steam-only if credentials are absent. The design doc (`reddit_source_adapter.md`) describes a future unauthenticated-JSON adapter with Supabase caching for resilience on data-center IPs; the current implementation uses PRAW.
+
+### External data caching design
+`project context files/supabase_reddit_cache.md` specifies a generic `api_cache` table (`source TEXT, key TEXT, payload JSONB, fetched_at TIMESTAMPTZ`) that backs the source adapters. The table schema and TTL semantics are documented there; apply it when building the unauthenticated Reddit adapter or other volatile-source collectors.
+
 ---
 
-## Running the Agents (Phase 1)
+## Running the Agents
 ```bash
 # Install dependencies
 pip install -r requirements.txt
 
-# Run the watchlist seeding agent (one-time)
+# Apply pending migrations (Supabase SQL Editor or psql)
+# database/migrations/001_sentiment_snapshots_unique.sql
+
+# Run the watchlist seeding agent (one-time, idempotent)
 python agents/orchestrator/seed_watchlist.py
 
-# Run the full weekly pipeline (eventually triggered by GitHub Actions)
-python agents/orchestrator/run_pipeline.py
+# RAWG backfill — populate rawg_slug and steam_app_id (one-time, resumable)
+python scripts/rawg_backfill.py --dry-run     # preview
+python scripts/rawg_backfill.py               # full run
+python scripts/rawg_backfill.py --limit 50 --offset 200  # resume from offset
+
+# Test an individual worker
+python -c "import sys; sys.path.insert(0, '.'); from dotenv import load_dotenv; load_dotenv(); from agents.workers.market_player import worker; import json; print(json.dumps(worker.run(), indent=2))"
+
+# Run the full weekly pipeline (triggered by GitHub Actions cron)
+python run_weekly.py
 ```

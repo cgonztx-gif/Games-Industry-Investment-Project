@@ -12,6 +12,7 @@ from agents.orchestrator.crew import games_intel_crew
 from agents.workers.financial_overlay import worker as financial_worker
 from agents.workers.market_player import worker as market_worker
 from agents.workers.studio_intel import worker as studio_intel_worker
+from agents.workers.sentiment import worker as sentiment_worker
 
 if __name__ == "__main__":
     print("=" * 60)
@@ -31,6 +32,12 @@ if __name__ == "__main__":
     print("=== Studio Intel (EDGAR 8-K Signals) ===")
     print("=" * 60)
     studio_intel_worker.run()
+
+    print("\n" + "=" * 60)
+    print("=== Sentiment Analysis (Reddit + Steam) ===")
+    print("=" * 60)
+    sentiment_result = sentiment_worker.run()
+    print(f"Sentiment: {sentiment_result['games_processed']} games written | {sentiment_result['error_count']} errors")
 
     print("\n" + "=" * 60)
     print("=== Weekly CrewAI Pipeline ===")

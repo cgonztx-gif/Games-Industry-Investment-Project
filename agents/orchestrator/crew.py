@@ -83,8 +83,15 @@ task_market = Task(
 )
 
 task_sentiment = Task(
-    description="Return the string OK. (Placeholder — real sentiment collection added in Phase 2.)",
-    expected_output="OK",
+    description=(
+        "Sentiment data (Reddit + Steam reviews) has already been collected by the "
+        "sentiment worker module and written to the sentiment_snapshots table for today. "
+        "Each game has a VADER-weighted score (1–10), top 3 aspect-themes from Claude Haiku ABSA, "
+        "a divergence flag (text sentiment vs. review count signal), and a vocal-minority note. "
+        "Confirm that sentiment collection completed successfully. "
+        "(Signal interpretation and cross-game comparison added in Phase 4 synthesis.)"
+    ),
+    expected_output="Sentiment data collection complete.",
     agent=sentiment,
 )
 

@@ -44,7 +44,7 @@ A multi-agent investment intelligence system that monitors the games industry ac
 **Purpose:** Capture qualitative community mood that quantitative metrics lag behind.
 
 - **Sources:**
-  - Reddit (r/gaming, game-specific subreddits via Reddit API)
+  - Reddit (r/gaming, game-specific subreddits via the public read-only `.json` endpoints, accessed through a `RedditSource` adapter — the official Data API is not used)
   - X/Twitter (developer accounts, gaming journalists, trending game hashtags)
   - YouTube (comment scraping on patch notes videos, review videos, developer update videos)
   - Steam discussion boards and review text
@@ -181,7 +181,7 @@ Claude handles all qualitative synthesis — sentiment scoring, briefing generat
 Native cron scheduling via GitHub Actions eliminates the need for a separate scheduler service. Each agent run is triggered on schedule (e.g., weekly), executes, writes to the database, and exits. Free for public repos; 2,000 minutes/month on private repos. No Celery or Redis required at MVP scale.
 
 ### Database: Supabase (free tier)
-Supabase provides a managed PostgreSQL database, auto-generated REST API, authentication, and real-time subscriptions — all on a generous free tier (500MB DB, 2 projects, 50K monthly active users). The free tier is sufficient to validate the entire project. Its pgvector extension also supports future embedding-based similarity search if the system evolves toward RAG.
+Supabase provides a managed PostgreSQL database, auto-generated REST API, authentication, and real-time subscriptions — all on a generous free tier (500MB DB, 2 projects, 50K monthly active users). The free tier is sufficient to validate the entire project. Its pgvector extension also supports future embedding-based similarity search if the system evolves toward RAG. It also backs a generic `api_cache` table (`SupabaseRedditCache`) used to cache and serve last-known-good payloads from volatile external sources.
 
 ### Data & APIs
 | Source | Tool | Cost |
@@ -189,10 +189,12 @@ Supabase provides a managed PostgreSQL database, auto-generated REST API, authen
 | Player metrics | Steam API, IGDB, RAWG | Free |
 | Stock & financial data | Yahoo Finance (yfinance Python lib) | Free |
 | SEC filings | SEC EDGAR full-text search API | Free |
-| Reddit sentiment | Reddit API (PRAW) | Free |
+| Reddit sentiment | Public read-only `.json` endpoints via a `RedditSource` adapter (rate-limited, cached, graceful degradation) | Free |
 | X/Twitter sentiment | X Basic API (limited) or Nitter RSS | Free / limited |
 | Web scraping | Playwright (headless browser, job boards, YouTube comments) | Free |
 | Paper trading execution | Alpaca Paper Trading API | Free |
+
+**Source adapters & resilience.** Volatile or unofficial sources are wrapped behind a single swappable adapter interface rather than called directly, so a provider policy change touches one file instead of the whole pipeline. Reddit is the first case: with self-service Data API access closed off (Nov 2025 Responsible Builder Policy), the system reads the public, read-only `.json` endpoints through a `RedditSource` adapter that enforces a conservative request pace (well under the ~10 req/min unauthenticated ceiling), caches every payload in Supabase, and **degrades gracefully** — serving last-known-good data instead of failing the weekly run when Reddit throttles or blocks the (data-center) GitHub Actions IP. The same interface lets an alternate egress (proxy or managed scraper) drop in later with no downstream change. See the *RedditSource Adapter* and *SupabaseRedditCache* design docs.
 
 ### Frontend: Next.js + shadcn/ui + Recharts
 **Next.js 16** with the App Router is the current standard for data dashboards. Paired with **shadcn/ui** (free, MIT — components are copied into your project, no lock-in) and **Recharts** for charts, this stack produces a production-quality analytics dashboard without a template purchase. The Shadcn Admin open-source starter (~6K GitHub stars) provides a complete foundation including sidebar navigation, data tables via TanStack Table, and dark mode out of the box.
@@ -221,6 +223,7 @@ Vercel's free Hobby tier handles the Next.js dashboard with zero configuration. 
 - **Games:** game_id, title, studio_id, genre, release_date, is_live_service
 - **PlayerMetrics:** game_id, date, concurrent_players, review_score, review_count
 - **SentimentSnapshot:** game_id, date, source, sentiment_score, top_themes, flagged_events
+- **ApiCache:** source, key, payload (JSONB), fetched_at — generic cache backing the source adapters (Reddit `.json`, reusable for other volatile sources)
 - **PatchEvents:** game_id, date, patch_type, scope_summary, cadence_delta
 - **StudioSignals:** studio_id, date, signal_type, description, severity
 - **PortfolioPositions:** ticker, studio_id, entry_date, current_signal, recommendation
@@ -305,7 +308,7 @@ Vercel's free Hobby tier handles the Next.js dashboard with zero configuration. 
 Set up Supabase project and schema including the `watchlist` and `watchlist_proposals` tables. Build the one-time Claude-powered seeding agent that queries IGDB, RAWG, and Steam to populate the initial watchlist. Scaffold the CrewAI crew with placeholder agents. Set up GitHub Actions cron trigger. Verify the watchlist is populated and data is flowing.
 
 **Phase 2 — Sentiment Layer (Weeks 3–4)**
-Integrate Reddit API (PRAW) and X API. Build the hybrid sentiment pipeline: VADER baseline pass plus the Claude-powered aspect-based analysis (`sentiment-analysis-methodology` skill). Establish per-game scoring, aspect-theme extraction, and the divergence check against quantitative signals. Add Playwright scraper for Steam discussion boards and YouTube comments.
+Build the `RedditSource` adapter — unauthenticated read-only `.json` endpoints, with rate limiting, Supabase-backed caching (`SupabaseRedditCache`), and graceful degradation when blocked — and integrate the X source. Build the hybrid sentiment pipeline: VADER baseline pass plus the Claude-powered aspect-based analysis (`sentiment-analysis-methodology` skill). Establish per-game scoring, aspect-theme extraction, and the divergence check against quantitative signals. Add Playwright scraper for Steam discussion boards and YouTube comments.
 
 **Phase 3 — Studio & Financial Intelligence (Weeks 5–6)**
 Add Playwright-based job posting scraper, map studios to tickers, integrate yfinance and SEC EDGAR. Build the financial overlay agent and signal correlation logic.

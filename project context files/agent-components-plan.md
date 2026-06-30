@@ -81,7 +81,7 @@ The skill's `SKILL.md` would encode:
 **Role:** Convert unstructured community chatter into a structured, defensible sentiment read. This is the agent with the deepest analytical method, because naive sentiment scoring is notoriously misleading.
 
 ### Tools
-- `reddit_api` (PRAW) — fetch top/hot posts and comments from game subreddits
+- `reddit_source` — fetch top/hot posts and comments from game subreddits via the public read-only `.json` endpoints (the official Data API is not used); rate-limited, cached, and degrades gracefully when blocked (see the *RedditSource Adapter* and *SupabaseRedditCache* designs)
 - `x_api` — fetch posts from developer accounts, journalists, hashtags
 - `youtube_scraper` (Playwright) — comment extraction on patch/review/update videos
 - `steam_reviews_api` — review text + helpfulness weighting
@@ -171,7 +171,7 @@ Encodes how to read organizational signals:
 - `steam_api` — trending / top-by-CCU charts
 - `igdb_api` — upcoming release calendar with wishlist signals
 - `sec_edgar_api` — new filings (IPOs, acquisitions)
-- `reddit_api` / `x_api` — mention-volume spikes for untracked titles
+- `reddit_source` / `x_api` — mention-volume spikes for untracked titles (Reddit via the shared `RedditSource` adapter)
 - `db_write` — write to `WatchlistProposals`
 
 ### Skill: `watchlist-relevance-scoring`
@@ -228,7 +228,7 @@ A deliberately thin, tightly-scoped subagent whose *only* tools are the Alpaca o
 The Claude Agent SDK supports **hooks** that fire at lifecycle points (before a tool call, after a response, on error). Use them for:
 - **Pre-trade guard:** a `before-tool-call` hook on any Alpaca order tool that hard-blocks execution unless the trade's `status` is `approved` in Supabase — a belt-and-suspenders check on top of the approval UI
 - **Cost control:** logging token spend per subagent run
-- **Error recovery:** catching a failed API call and retrying or degrading gracefully rather than crashing the run
+- **Error recovery:** catching a failed API call and retrying or degrading gracefully rather than crashing the run — e.g. the `RedditSource` adapter serving last-known-good data from its Supabase cache when Reddit throttles or blocks the run
 
 ### Observability (LangSmith / OpenTelemetry)
 Every `query()` can expand into dozens of turns and tool calls across subagents. Standard OpenTelemetry-based tracing captures the full trace tree — every LLM turn, every tool call with arguments and results, token counts per step, grouped by session. Essential for debugging "why did the sentiment subagent come back empty" or "why did the synthesis agent burn 40K tokens."
@@ -246,6 +246,9 @@ As the skill library grows, prevent conflicts with:
 - **Non-overlapping trigger descriptions** in each `SKILL.md` frontmatter (the primary conflict-avoidance mechanism)
 - **Subagent isolation** as a structural conflict resolver (skills loaded in one worker don't bleed into another)
 - **Version control + semantic versioning** for each skill directory, treated like the rest of the codebase
+
+### External data-source adapters (resilience)
+Volatile or unofficial upstreams are isolated behind a single swappable adapter interface so a provider policy change is contained to one module. The reference case is `RedditSource`: with self-service Data API access closed off (Nov 2025 Responsible Builder Policy), the system reads public read-only `.json` endpoints through an adapter that paces requests under the unauthenticated rate ceiling, caches every payload (`SupabaseRedditCache`, backed by a generic `api_cache` table), and degrades to last-known-good on a block rather than failing the run — relevant because the pipeline runs from data-center (GitHub Actions) IPs, which Reddit throttles first. Because every layer (raw fetch, cache wrapper, fallback chain) implements the same interface, an alternate egress (proxy or managed scraper) drops in with no change to the Sentiment or Discovery subagents that depend on it. The same pattern generalizes to any source with a fragile access path. See the dedicated *RedditSource Adapter* and *SupabaseRedditCache* design docs.
 
 ---
 
@@ -271,6 +274,7 @@ This internal structure is what separates "I called some APIs and an LLM" from "
 - **Context engineering** via isolation and progressive disclosure
 - **Encoded domain methodology** (real KPI frameworks, the VADER+LLM+ABSA hybrid, materiality weighting) rather than generic prompting
 - **Safety-by-architecture** (the execution subagent's tool restriction + the pre-trade hook)
+- **Resilient integrations** (swappable source adapters with caching and graceful degradation, so a provider policy change or IP block doesn't break the pipeline)
 - **Cost discipline** (model tiering, locked configs, tracing)
 
 These are exactly the competencies an AI Solutions Architect is hired to bring.

@@ -237,6 +237,41 @@ def get_studios_with_tickers(client: Client) -> list[dict]:
     return list(seen.values())
 
 
+# ---------------------------------------------------------------------------
+# RAWG backfill helpers
+# ---------------------------------------------------------------------------
+
+def get_games_missing_rawg(client: Client, limit: int = 0, offset: int = 0) -> list[dict]:
+    """Return games where rawg_slug IS NULL, ordered by title. Paginated via limit/offset."""
+    q = (
+        client.table("games")
+        .select("game_id, title, release_date, steam_app_id")
+        .is_("rawg_slug", "null")
+        .order("title")
+    )
+    if offset:
+        q = q.range(offset, offset + (limit or 10_000) - 1)
+    elif limit:
+        q = q.limit(limit)
+    return q.execute().data
+
+
+def update_game_rawg_data(client: Client, game_id: str, updates: dict) -> None:
+    """Patch rawg_slug, steam_app_id, metacritic, or esrb_rating onto a games row."""
+    client.table("games").update(updates).eq("game_id", game_id).execute()
+
+
+# ---------------------------------------------------------------------------
+# Sentiment worker helpers
+# ---------------------------------------------------------------------------
+
+def write_sentiment_snapshot(client: Client, snapshot: dict) -> None:
+    """Upsert one sentiment_snapshots row. Requires uq_sentiment_game_date_source constraint."""
+    client.table("sentiment_snapshots").upsert(
+        snapshot, on_conflict="game_id,date,source"
+    ).execute()
+
+
 def write_studio_signal(client: Client, signal: dict) -> bool:
     """
     Insert one studio_signals row. Returns True if inserted, False if already exists.
