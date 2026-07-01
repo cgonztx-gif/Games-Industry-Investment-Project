@@ -29,7 +29,7 @@
 - [x] `run_weekly.py` wires all three workers + CrewAI crew
 
 ### Testing
-- [ ] End-to-end test `market_player` worker (run against live Supabase, verify rows in `player_metrics`)
+- [x] End-to-end test `market_player` worker (run against live Supabase, verify rows in `player_metrics`)
 - [x] End-to-end test `financial_overlay` worker (verify rows in `portfolio_positions_context`)
 - [x] End-to-end test `studio_intel` worker (verify rows in `studio_signals`)
 - [x] Run full `run_weekly.py` pipeline and confirm no crashes
@@ -45,7 +45,7 @@
 - [x] Implement vocal-minority guard — engagement-weighted VADER score + divergence note
 - [x] Wire sentiment worker into `run_weekly.py`
 - [x] Wire sentiment task in `agents/orchestrator/crew.py` (`task_sentiment`)
-- [ ] Apply `database/migrations/001_sentiment_snapshots_unique.sql` in Supabase SQL Editor (required before first run)
+- [x] Apply `database/migrations/001_sentiment_snapshots_unique.sql` in Supabase SQL Editor (required before first run)
 
 ### RAWG backfill
 - [x] Build standalone RAWG backfill script — `scripts/rawg_backfill.py` (resumable, `--dry-run` / `--limit` / `--offset` / `--fix-steam` flags)
