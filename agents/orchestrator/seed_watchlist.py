@@ -88,6 +88,16 @@ def is_investment_relevant(game: dict) -> bool:
     return False
 
 
+def infer_sentiment_tier(game: dict, ticker: str | None) -> str:
+    """Assign Reddit collection budget at seed time."""
+    ccu = game.get("ccu") or 0
+    if ticker and (game.get("is_live_service") or ccu >= 10_000):
+        return "tier_a"
+    if ccu >= 25_000:
+        return "tier_a"
+    return "listing_only"
+
+
 # ---------------------------------------------------------------------------
 # Cross-source merge helpers
 # ---------------------------------------------------------------------------
@@ -228,7 +238,7 @@ def main(dry_run: bool = False, limit: int = 0) -> None:
             unique_igdb.append(g)
     print(f"\n[igdb] {len(unique_igdb)} unique IGDB game(s) after dedup.")
 
-    # --- Fetch SteamSpy data ---
+    # --- Fetch Steam most-played data ---
     print("\n[steam] Fetching top CCU games …")
     top_ccu = get_top_ccu_games(min_ccu=1_000)
     print(f"  {len(top_ccu)} top-CCU game(s).")
@@ -306,7 +316,13 @@ def main(dry_run: bool = False, limit: int = 0) -> None:
 
         # Write watchlist entry
         ticker = game.get("ticker") or studio_rec.get("ticker")
-        added = insert_watchlist_entry(db, game_id, studio_id, ticker)
+        added = insert_watchlist_entry(
+            db,
+            game_id,
+            studio_id,
+            ticker,
+            sentiment_tier=infer_sentiment_tier(game, ticker),
+        )
         if added:
             watchlist_added += 1
         games_written += 1

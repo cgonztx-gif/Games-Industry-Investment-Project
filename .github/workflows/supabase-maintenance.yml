@@ -1,0 +1,25 @@
+name: supabase-maintenance
+
+on:
+  schedule:
+    - cron: "0 13 * * 4"   # Thursdays 13:00 UTC, between weekly runs
+  workflow_dispatch: {}
+
+jobs:
+  keepalive-and-prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install supabase python-dotenv
+
+      - name: Supabase keepalive and api_cache prune
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/supabase_maintenance.py

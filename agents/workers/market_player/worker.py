@@ -1,8 +1,9 @@
 """
 Market & Player Data Worker — Phase 2
 
-Reads every active watchlist game with a Steam ID, fetches current CCU and
-review metrics from SteamSpy, and writes one row per game into player_metrics.
+Reads every active watchlist game with a Steam ID, fetches current CCU from the
+official Steam Web API and review metrics from cached Steam appreviews, then
+writes one row per game into player_metrics.
 
 Returns a structured summary dict consumed by the orchestrator.
 """
@@ -11,6 +12,7 @@ import os
 from datetime import date
 
 from agents.workers.market_player.steam_client import get_app_metrics
+from database.api_cache import SupabaseApiCache
 from database.db_client import (
     get_client,
     get_watchlist_games,
@@ -21,6 +23,7 @@ from database.db_client import (
 
 def run() -> dict:
     db = get_client()
+    review_cache = SupabaseApiCache(client=db, source="steam_appreviews")
     today = date.today().isoformat()
 
     all_games = get_watchlist_games(db)
@@ -38,7 +41,7 @@ def run() -> dict:
         steam_id = game["steam_app_id"]
 
         try:
-            metrics = get_app_metrics(steam_id)
+            metrics = get_app_metrics(steam_id, review_cache=review_cache)
 
             prev = get_last_player_metrics(db, game_id)
             velocity = None

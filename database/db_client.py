@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
 from supabase import create_client, Client
@@ -88,7 +89,11 @@ def find_or_create_game(client: Client, game: dict, studio_id: str) -> str:
 
 
 def insert_watchlist_entry(
-    client: Client, game_id: str, studio_id: str, ticker: Optional[str]
+    client: Client,
+    game_id: str,
+    studio_id: str,
+    ticker: Optional[str],
+    sentiment_tier: str = "listing_only",
 ) -> bool:
     """Insert watchlist entry. Returns True if inserted, False if already existed."""
     existing = (
@@ -108,6 +113,7 @@ def insert_watchlist_entry(
             "ticker": ticker,
             "active": True,
             "added_by": "seed",
+            "sentiment_tier": sentiment_tier,
         }
     ).execute()
     return True
@@ -155,7 +161,10 @@ def get_watchlist_games(client: Client) -> list[dict]:
     """Return all active watchlist games joined with their games row."""
     resp = (
         client.table("watchlist")
-        .select("game_id, games(game_id, title, steam_app_id, igdb_id)")
+        .select(
+            "id, game_id, sentiment_tier, subreddit, "
+            "games(game_id, title, steam_app_id, igdb_id)"
+        )
         .eq("active", True)
         .execute()
     )
@@ -163,8 +172,30 @@ def get_watchlist_games(client: Client) -> list[dict]:
     for row in resp.data:
         game = row.get("games")
         if game:
-            result.append({**game, "watchlist_game_id": row["game_id"]})
+            result.append(
+                {
+                    **game,
+                    "watchlist_id": row["id"],
+                    "watchlist_game_id": row["game_id"],
+                    "sentiment_tier": row.get("sentiment_tier") or "listing_only",
+                    "subreddit": row.get("subreddit"),
+                }
+            )
     return result
+
+
+def update_watchlist_subreddit(
+    client: Client,
+    watchlist_id: str,
+    subreddit: Optional[str],
+) -> None:
+    """Persist subreddit resolution, including confirmed misses."""
+    client.table("watchlist").update(
+        {
+            "subreddit": subreddit or "",
+            "subreddit_resolved_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).eq("id", watchlist_id).execute()
 
 
 def get_last_player_metrics(client: Client, game_id: str) -> Optional[dict]:
@@ -191,27 +222,48 @@ def write_player_metrics(client: Client, metrics: dict) -> None:
 
 def get_watchlist_tickers(client: Client) -> list[dict]:
     """
-    Return distinct {ticker, studio_id} for all studios with a public ticker.
-    Deduplicates by ticker (e.g. TTWO maps to Take-Two, 2K, and Rockstar —
-    only the first studio_id encountered is kept).
+    Return one row per ticker with simple materiality context.
+
+    The representative studio_id is the studio with the most active tracked games
+    for that ticker, not whichever studio happens to appear first.
     """
     resp = (
-        client.table("studios")
-        .select("studio_id, ticker")
+        client.table("watchlist")
+        .select("ticker, studio_id")
         .not_.is_("ticker", "null")
+        .eq("active", True)
         .execute()
     )
-    seen: dict[str, str] = {}
+    grouped: dict[str, dict] = {}
     for row in resp.data:
         t = row["ticker"]
-        if t not in seen:
-            seen[t] = row["studio_id"]
-    return [{"ticker": t, "studio_id": sid} for t, sid in seen.items()]
+        studio_id = row.get("studio_id")
+        grouped.setdefault(t, {"studio_counts": {}, "tracked_games": 0})
+        grouped[t]["tracked_games"] += 1
+        if studio_id:
+            counts = grouped[t]["studio_counts"]
+            counts[studio_id] = counts.get(studio_id, 0) + 1
+
+    result = []
+    for ticker, item in grouped.items():
+        studio_counts = item["studio_counts"]
+        representative = None
+        if studio_counts:
+            representative = max(studio_counts.items(), key=lambda kv: kv[1])[0]
+        result.append(
+            {
+                "ticker": ticker,
+                "studio_id": representative,
+                "tracked_games": item["tracked_games"],
+                "mapped_studios": len(studio_counts),
+            }
+        )
+    return result
 
 
 def write_equity_metrics(client: Client, metrics: dict) -> None:
-    """Upsert one portfolio_positions_context row. Safe to call multiple times per (ticker, date)."""
-    client.table("portfolio_positions_context").upsert(metrics, on_conflict="ticker,date").execute()
+    """Upsert one equity_signals row. Safe to call multiple times per (ticker, date)."""
+    client.table("equity_signals").upsert(metrics, on_conflict="ticker,date").execute()
 
 
 # ---------------------------------------------------------------------------
@@ -291,3 +343,133 @@ def write_studio_signal(client: Client, signal: dict) -> bool:
 
     client.table("studio_signals").insert(signal).execute()
     return True
+
+
+# ---------------------------------------------------------------------------
+# Patch notes worker helpers
+# ---------------------------------------------------------------------------
+
+def get_last_patch_event(client: Client, game_id: str) -> Optional[dict]:
+    """Return the most recent patch_events row for cadence calculations."""
+    resp = (
+        client.table("patch_events")
+        .select("date")
+        .eq("game_id", game_id)
+        .order("date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def write_patch_event(client: Client, event: dict) -> bool:
+    """
+    Insert one patch_events row. Returns True if inserted, False if already exists.
+    Prefers source_url idempotency when migration 004 has been applied.
+    """
+    source_url = event.get("source_url")
+    if source_url:
+        existing = (
+            client.table("patch_events")
+            .select("id")
+            .eq("game_id", event["game_id"])
+            .eq("source_url", source_url)
+            .execute()
+        )
+        if existing.data:
+            return False
+
+    client.table("patch_events").insert(event).execute()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Synthesis helpers
+# ---------------------------------------------------------------------------
+
+def get_weekly_outputs(client: Client, run_date: str, week_start: str) -> dict:
+    """Read same-week worker outputs for synthesis."""
+    player_metrics = (
+        client.table("player_metrics")
+        .select("*")
+        .eq("date", run_date)
+        .execute()
+        .data
+    )
+    sentiment = (
+        client.table("sentiment_snapshots")
+        .select("*")
+        .eq("date", run_date)
+        .execute()
+        .data
+    )
+    patch_events = (
+        client.table("patch_events")
+        .select("*")
+        .gte("date", week_start)
+        .lte("date", run_date)
+        .execute()
+        .data
+    )
+    studio_signals = (
+        client.table("studio_signals")
+        .select("*")
+        .gte("date", week_start)
+        .lte("date", run_date)
+        .execute()
+        .data
+    )
+    equity_signals = (
+        client.table("equity_signals")
+        .select("*")
+        .eq("date", run_date)
+        .execute()
+        .data
+    )
+    return {
+        "player_metrics": player_metrics or [],
+        "sentiment": sentiment or [],
+        "patch_events": patch_events or [],
+        "studio_signals": studio_signals or [],
+        "equity_signals": equity_signals or [],
+    }
+
+
+def write_weekly_briefing(client: Client, briefing: dict) -> None:
+    """Upsert one weekly briefing row."""
+    client.table("weekly_briefings").upsert(
+        briefing,
+        on_conflict="week_of",
+    ).execute()
+
+
+# ---------------------------------------------------------------------------
+# Portfolio / execution helpers
+# ---------------------------------------------------------------------------
+
+def get_trade_order(client: Client, order_id: str) -> Optional[dict]:
+    resp = (
+        client.table("trade_orders")
+        .select("*")
+        .eq("order_id", order_id)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def get_approved_trade_orders(client: Client) -> list[dict]:
+    return (
+        client.table("trade_orders")
+        .select("*")
+        .eq("status", "approved")
+        .execute()
+        .data
+        or []
+    )
+
+
+def attach_alpaca_order_id(client: Client, order_id: str, alpaca_order_id: str) -> None:
+    client.table("trade_orders").update(
+        {"alpaca_order_id": alpaca_order_id}
+    ).eq("order_id", order_id).execute()

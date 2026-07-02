@@ -9,10 +9,11 @@ A multi-agent investment intelligence system that monitors the games industry ac
 
 **Core thesis:** Game-level data (player counts, sentiment, patch cadence, studio hiring) leads financial performance. Traditional investors underweight it.
 
-Full design: `project context files/games-investment-platform-brief.md`  
-Agent internals: `project context files/agent-components-plan.md`  
-Reddit adapter design: `project context files/reddit_source_adapter.md`  
-Supabase cache design: `project context files/supabase_reddit_cache.md`
+Full design: `docs/games-investment-platform-brief.md`  
+Agent internals: `docs/agent-components-plan.md`  
+Risk register: `docs/data-source-risk-register.md`  
+Reddit adapter design: `docs/reddit_source_adapter.md`  
+Supabase cache design: `docs/supabase_reddit_cache.md`
 
 ---
 
@@ -45,8 +46,8 @@ database/
   schema.sql          Supabase table definitions
   migrations/         Incremental schema changes (apply in Supabase SQL Editor)
 scripts/              One-off maintenance scripts (rawg_backfill.py, etc.)
-dashboard/            Next.js frontend (scaffolded in Phase 6)
-project context files/ Planning and design documents
+dashboard/            Next.js frontend (scaffolded in Phase 7)
+docs/                 Planning and design documents
 .github/workflows/    GitHub Actions cron pipelines
 ```
 
@@ -58,10 +59,10 @@ project context files/ Planning and design documents
 | 1 | Foundation + Watchlist Seeding | **Complete** |
 | 2 | Sentiment Layer | **In progress** |
 | 3 | Studio & Financial Intelligence | Partially built |
-| 4 | Synthesis Agent & Briefing | Planned |
-| 5 | Discovery Agent | Planned |
-| 6 | Dashboard Polish | Planned |
-| 7 | Portfolio Manager + Alpaca Execution | Planned |
+| 4 | Synthesis Agent & Briefing | Partially built |
+| 5 | Portfolio Manager + Alpaca Execution | Partially built |
+| 6 | Discovery Agent | Planned |
+| 7 | Dashboard Polish | Planned |
 
 See `tasks.md` for per-phase checklists and current status.
 
@@ -74,14 +75,14 @@ Copy `.env.example` to `.env`. Required per phase:
 - `ANTHROPIC_API_KEY`
 - `SUPABASE_URL`, `SUPABASE_KEY`
 - `STEAM_API_KEY`
-- `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`
+- `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`
 - `RAWG_API_KEY`
 
 **Phase 2 (sentiment worker):**
-- `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT` — required for PRAW Reddit client; worker degrades to Steam-only if missing
+- No Reddit OAuth credentials are required. Reddit collection uses public read-only `.json` endpoints through `agents/workers/sentiment/reddit_source.py` and `api_cache`.
+- `YOUTUBE_API_KEY` is required once the YouTube Data API comment collector is enabled.
 
 **Later phases:**
-- `X_BEARER_TOKEN`
 - `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`
 - `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`
 
@@ -103,17 +104,17 @@ Always lock the model per-agent in config; never default to the most capable.
 2. **Skills live in `agents/skills/`** as `SKILL.md` files with frontmatter `trigger:` descriptions for progressive disclosure
 3. **Subagents are strictly two levels deep** — orchestrator → workers; workers cannot spawn subagents (SDK constraint)
 4. **Execution subagent has Alpaca tools only** — tool restriction is the primary safety guardrail
-5. **All trade execution requires `status = 'approved'` in Supabase** — enforced by a `before-tool-call` lifecycle hook as belt-and-suspenders
+5. **All trade execution requires `status = 'approved'` in Supabase** — enforced inside the order-placement tool, with lifecycle hooks only as an additional mirror later
 
 ### Sentiment pipeline internals (`agents/workers/sentiment/`)
 The sentiment worker runs a two-pass pipeline per game:
 - **VADER baseline** (`vader_scorer.py`) — deterministic rule-based polarity score over all texts, returns a 1–10 float
 - **ABSA** (`absa_client.py`) — Claude Haiku extracts aspect→polarity pairs (e.g. `monetization → negative`); skipped if fewer than 5 texts; top 3 aspects returned
-- **Divergence check** (`divergence.py`) — compares text sentiment against last known player metrics; sets `divergence_flag` if significant gap
-- **Reddit client** (`reddit_client.py`) — PRAW OAuth (requires `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`); gracefully skips Reddit and runs Steam-only if credentials are absent. The design doc (`reddit_source_adapter.md`) describes a future unauthenticated-JSON adapter with Supabase caching for resilience on data-center IPs; the current implementation uses PRAW.
+- **Preliminary lagged flag** (`divergence.py`) — optional hint against the latest stored player metrics; authoritative same-week divergence belongs in synthesis
+- **Reddit source** (`reddit_source.py`, `reddit_cache.py`) — unauthenticated public `.json` adapter with rate limiting, Supabase-backed `api_cache`, and stale fallback. No PRAW/OAuth path is used.
 
 ### External data caching design
-`project context files/supabase_reddit_cache.md` specifies a generic `api_cache` table (`source TEXT, key TEXT, payload JSONB, fetched_at TIMESTAMPTZ`) that backs the source adapters. The table schema and TTL semantics are documented there; apply it when building the unauthenticated Reddit adapter or other volatile-source collectors.
+`docs/supabase_reddit_cache.md` specifies a generic `api_cache` table (`source TEXT, key TEXT, payload JSONB, fetched_at TIMESTAMPTZ`) that backs Tier-2 source adapters. The table schema and TTL semantics are documented there; apply migrations before running volatile-source collectors.
 
 ---
 
@@ -124,14 +125,21 @@ pip install -r requirements.txt
 
 # Apply pending migrations (Supabase SQL Editor or psql)
 # database/migrations/001_sentiment_snapshots_unique.sql
+# database/migrations/002_api_cache.sql
+# database/migrations/003_watchlist_sentiment_targets.sql
+# database/migrations/004_patch_events_source_url.sql
+# database/migrations/005_equity_signals.sql
 
 # Run the watchlist seeding agent (one-time, idempotent)
 python agents/orchestrator/seed_watchlist.py
 
 # RAWG backfill — populate rawg_slug and steam_app_id (one-time, resumable)
-python scripts/rawg_backfill.py --dry-run     # preview
-python scripts/rawg_backfill.py               # full run
-python scripts/rawg_backfill.py --limit 50 --offset 200  # resume from offset
+python scripts/rawg_backfill.py --dry-run                 # preview full default page
+python scripts/rawg_backfill.py --chunk-size 100 --dry-run # preview next chunk
+python scripts/rawg_backfill.py --chunk-size 100           # run one bounded chunk
+python scripts/rawg_backfill.py --chunk-size 100 --max-chunks 5  # run up to five chunks
+python scripts/rawg_backfill.py                            # full run
+python scripts/rawg_backfill.py --limit 50 --offset 200    # manual page
 
 # Test an individual worker
 python -c "import sys; sys.path.insert(0, '.'); from dotenv import load_dotenv; load_dotenv(); from agents.workers.market_player import worker; import json; print(json.dumps(worker.run(), indent=2))"

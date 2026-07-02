@@ -8,8 +8,10 @@ from datetime import date
 
 import yfinance as yf
 
+from database.api_cache import ApiCache
 
-def get_equity_snapshot(ticker: str) -> dict:
+
+def _fetch_equity_snapshot(ticker: str) -> dict:
     info = yf.Ticker(ticker).info
 
     price = info.get("currentPrice") or info.get("previousClose")
@@ -35,3 +37,27 @@ def get_equity_snapshot(ticker: str) -> dict:
         "earnings_date": earnings_date,
         "short_interest": short_interest,
     }
+
+
+def get_equity_snapshot(
+    ticker: str,
+    cache: ApiCache | None = None,
+    ttl_hours: int = 24,
+) -> dict:
+    key = f"snapshot:{ticker}"
+    if cache:
+        fresh = cache.get(key, max_age_hours=ttl_hours)
+        if isinstance(fresh, dict):
+            return fresh
+
+    try:
+        snapshot = _fetch_equity_snapshot(ticker)
+        if cache:
+            cache.set(key, snapshot)
+        return snapshot
+    except Exception:
+        if cache:
+            stale = cache.get(key)
+            if isinstance(stale, dict):
+                return stale
+        raise

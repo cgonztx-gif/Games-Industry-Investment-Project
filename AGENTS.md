@@ -2,35 +2,34 @@
 
 ## Project Snapshot
 
-This repo implements a multi-agent games-industry investment intelligence platform. The current working design is in `project context files/`, with `CLAUDE.md` and `tasks.md` reflecting the most current implementation status. The `docs/` copies of the brief and agent plan are older snapshots; when they conflict with `project context files/`, prefer `project context files/`.
+This repo implements a multi-agent games-industry investment intelligence platform. The current working design is in `docs/`, with `CLAUDE.md` and `tasks.md` reflecting current implementation status. When guidance conflicts, prefer the updated planning set under `docs/`.
 
 The implemented system is currently a Python/Supabase data pipeline with a CrewAI shell:
 
-- `agents/orchestrator/seed_watchlist.py` seeds studios, games, and watchlist entries from IGDB and SteamSpy.
-- `agents/workers/market_player/worker.py` writes SteamSpy CCU and review metrics to `player_metrics`.
-- `agents/workers/financial_overlay/worker.py` writes yfinance equity snapshots to `portfolio_positions_context`.
+- `agents/orchestrator/seed_watchlist.py` seeds studios, games, and watchlist entries from IGDB, RAWG, and Steam-linked catalog data.
+- `agents/workers/market_player/worker.py` writes Steam player/review metrics to `player_metrics`.
+- `agents/workers/financial_overlay/worker.py` writes Alpaca/yfinance equity snapshots to `equity_signals`.
 - `agents/workers/studio_intel/worker.py` writes recent SEC EDGAR 8-K signals to `studio_signals`.
-- `agents/workers/sentiment/worker.py` writes Steam/PRAW Reddit sentiment snapshots to `sentiment_snapshots`.
+- `agents/workers/sentiment/worker.py` writes Steam/Reddit `.json` sentiment snapshots to `sentiment_snapshots`.
 - `run_weekly.py` runs the worker modules first, then starts the CrewAI summary pipeline.
 
-Planned but not yet implemented: patch notes worker, discovery worker, synthesis agent, portfolio manager, Alpaca execution, Next.js dashboard, LangSmith tracing, and all `agents/skills/*/SKILL.md` methodology files.
+Planned but not yet implemented: discovery worker, portfolio manager, returns tracker, Next.js dashboard, LangSmith tracing, and most `agents/skills/*/SKILL.md` methodology files.
 
 ## Source Of Truth
 
 - `tasks.md` is the active checklist and should be updated after completing operational tasks.
 - `CLAUDE.md` is the existing local agent guide and includes current run commands.
-- `project context files/games-investment-platform-brief.md` is the current system-level architecture.
-- `project context files/agent-components-plan.md` is the current agent/skill/tool architecture.
-- `project context files/reddit_source_adapter.md` and `project context files/supabase_reddit_cache.md` describe the desired future Reddit adapter and cache design.
+- `docs/games-investment-platform-brief.md` is the current system-level architecture.
+- `docs/agent-components-plan.md` is the current agent/skill/tool architecture.
+- `docs/data-source-risk-register.md` governs source access choices and required mitigations.
+- `docs/reddit_source_adapter.md` and `docs/supabase_reddit_cache.md` describe the Reddit adapter and generic cache design.
 - `database/schema.sql` is the baseline Supabase schema.
 - Add future schema changes as files under `database/migrations/`; do not silently edit historical schema for already-applied changes.
 
 ## Important Design Mismatches
 
-- Current sentiment code uses PRAW OAuth in `agents/workers/sentiment/reddit_client.py`.
-- The newer project context docs specify a public Reddit `.json` source adapter plus Supabase-backed `api_cache` graceful degradation. That adapter and table are design-only right now.
-- `README.md` still says Phase 1 is current, but `tasks.md` and `CLAUDE.md` show Phase 1 complete and Phase 2 nearly complete.
-- `docs/games-investment-platform-brief.md` and `docs/agent-components-plan.md` still describe the older PRAW design. Treat them as stale unless explicitly asked to sync them.
+- The current Reddit implementation uses public `.json` endpoints through `agents/workers/sentiment/reddit_source.py` plus Supabase-backed `api_cache` graceful degradation.
+- Seed-time trending discovery now uses Steam official most-played/app-list APIs plus IGDB/RAWG enrichment.
 - CrewAI agents in `agents/orchestrator/crew.py` mostly run placeholder confirmation tasks. The actual data collection happens in direct Python worker modules.
 
 ## Common Commands
@@ -85,24 +84,22 @@ Required for current pipeline work:
 
 Optional/current sentiment expansion:
 
-- `REDDIT_CLIENT_ID`
-- `REDDIT_CLIENT_SECRET`
-- `REDDIT_USER_AGENT`
+- `YOUTUBE_API_KEY` once the YouTube Data API collector is enabled
 
 Future phases:
 
-- `SUPABASE_SERVICE_KEY` for the planned `api_cache` adapter.
 - `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` for tracing.
 - `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, and `ALPACA_BASE_URL` for paper trading.
-- `X_BEARER_TOKEN` after X integration exists.
 
 Never print `.env` contents or secrets in responses.
 
 ## Operational Notes
 
-- The `market_player` worker sleeps one second per SteamSpy appdetails request. A full run can take several minutes when hundreds of Steam-linked watchlist games exist.
+- The `market_player` worker makes paced per-game external API requests. A full run can take several minutes when hundreds of Steam-linked watchlist games exist.
 - `scripts/rawg_backfill.py` sleeps three seconds per RAWG request and is intentionally slow to respect the free-tier limit. Use `--limit`, `--offset`, and `--fix-steam` for resumable passes.
 - `sentiment_snapshots` upserts require `database/migrations/001_sentiment_snapshots_unique.sql` to be applied in Supabase.
+- Tier-2 caching requires `database/migrations/002_api_cache.sql` to be applied in Supabase.
+- Watchlist sentiment targeting, patch event idempotency, and equity signals require migrations `003` through `005`.
 - GitHub Actions uses `.github/workflows/weekly.yml`; repo secrets still need to be configured externally.
 - Avoid reading or displaying `.env`. It exists locally and contains sensitive values.
 
@@ -114,5 +111,4 @@ Never print `.env` contents or secrets in responses.
 - For schema changes, add a migration under `database/migrations/`.
 - For future skills, create directories under `agents/skills/<skill-name>/SKILL.md`.
 - Keep workers resilient: catch per-item external API errors, collect them in returned summaries, and continue processing other games/tickers.
-- Do not introduce dashboard code until the project intentionally enters Phase 6.
-
+- Do not introduce dashboard code until the project intentionally enters Phase 7.

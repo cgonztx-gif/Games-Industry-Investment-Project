@@ -87,34 +87,46 @@ task_sentiment = Task(
         "Sentiment data (Reddit + Steam reviews) has already been collected by the "
         "sentiment worker module and written to the sentiment_snapshots table for today. "
         "Each game has a VADER-weighted score (1–10), top 3 aspect-themes from Claude Haiku ABSA, "
-        "a divergence flag (text sentiment vs. review count signal), and a vocal-minority note. "
+        "an optional preliminary lagged flag, and a vocal-minority note. "
         "Confirm that sentiment collection completed successfully. "
-        "(Signal interpretation and cross-game comparison added in Phase 4 synthesis.)"
+        "(Authoritative same-week divergence is handled by Phase 4 synthesis.)"
     ),
     expected_output="Sentiment data collection complete.",
     agent=sentiment,
 )
 
 task_patch = Task(
-    description="Return the string OK. (Placeholder — patch cadence analysis added in Phase 3.)",
-    expected_output="OK",
+    description=(
+        "Patch/update cadence data has already been collected by the patch_notes "
+        "worker module through the official Steam News API and written to the "
+        "patch_events table for recent Steam-linked games. Confirm that patch "
+        "collection completed successfully."
+    ),
+    expected_output="Patch cadence data collection complete.",
     agent=patch_notes,
 )
 
 task_studio = Task(
-    description="Return the string OK. (Placeholder — studio signal monitoring added in Phase 3.)",
-    expected_output="OK",
+    description=(
+        "Studio intelligence data has already been collected by the studio_intel "
+        "worker module from SEC EDGAR and any configured hosted ATS boards, then "
+        "written to the studio_signals table. Confirm completion."
+    ),
+    expected_output="Studio intelligence data collection complete.",
     agent=studio_intel,
 )
 
 task_financial = Task(
-    description="Return the string OK. (Placeholder — financial overlay added in Phase 3.)",
-    expected_output="OK",
+    description=(
+        "Financial overlay data has already been collected by the financial_overlay "
+        "worker module and written to the equity_signals table. Confirm completion."
+    ),
+    expected_output="Financial overlay data collection complete.",
     agent=financial_overlay,
 )
 
 task_discovery = Task(
-    description="Return the string OK. (Placeholder — discovery logic added in Phase 5.)",
+    description="Return the string OK. (Placeholder — discovery logic added in Phase 6.)",
     expected_output="OK",
     agent=discovery,
 )

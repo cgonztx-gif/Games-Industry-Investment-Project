@@ -22,8 +22,9 @@ Two design decisions worth stating up front:
    other adapter's payloads. Don't couple a cache to one upstream.
 2. **The cache stores JSON-native values (`list[dict]`), not domain dataclasses.**
    It knows nothing about `RedditPost`. The dataclass ↔ dict conversion lives one
-   layer up, in `CachedRedditSource`. This keeps the cache reusable and is a small
-   refinement to the Protocol sketch from the adapter doc — see §4.
+   layer up, in `CachedRedditSource` — the adapter doc's §5 implements exactly this
+   boundary; the rationale is in §4 below. This keeps the cache reusable for any
+   source.
 
 ## TTL semantics (the important subtlety)
 
@@ -89,10 +90,11 @@ class SupabaseRedditCache:
                 cutoff = (datetime.now(timezone.utc)
                           - timedelta(hours=max_age_hours)).isoformat()
                 q = q.gte("fetched_at", cutoff)        # stale rows filtered out
-            resp = q.maybe_single().execute()
-            if resp is None or not resp.data:
-                return None                            # miss (or filtered as stale)
-            return resp.data["payload"]
+            resp = q.limit(1).execute()                # a miss is an empty list —
+            rows = resp.data or []                     # never an exception.
+            if not rows:                               # (maybe_single() raises on
+                return None                            # zero rows in some client
+            return rows[0]["payload"]                  # versions; avoid it here)
         except Exception:                              # network, auth, decode, ...
             logger.warning("cache get failed for %s:%s — treating as miss",
                            self.source, key, exc_info=True)
@@ -131,10 +133,12 @@ cache = SupabaseRedditCache(
 reddit = build_reddit_source(cache)                   # from the adapter doc
 ```
 
-## 4. The serialization boundary (refinement to the adapter doc)
+## 4. The serialization boundary (rationale)
 
-Because the cache now stores `list[dict]`, `CachedRedditSource` owns the conversion to
-and from dataclasses. This is the clean separation; update the wrapper's methods to:
+Because the cache stores `list[dict]`, `CachedRedditSource` owns the conversion to
+and from dataclasses. This is the clean separation, and the adapter doc's §5 now
+shows the full wrapper with both methods — the sketch below is the shape of the
+`fetch_posts` side, kept here so this doc reads standalone:
 
 ```python
 from dataclasses import asdict
@@ -220,6 +224,14 @@ delete from api_cache where fetched_at < now() - interval '14 days';
 
 Set the retention longer than your TTL plus a comfortable margin, so the stale-fallback
 path always has something to serve.
+
+**Mind the 7-day inactivity pause.** Supabase pauses free-tier projects after **one
+week without database activity**, and restoring is manual. A weekly cron sits exactly
+on that boundary — one delayed or failed run and the *next* run finds a paused
+database, which (because the cache fails open) silently degrades every fetch to
+uncached and removes the stale-fallback safety net at the same time. The fix is a
+second, midweek GitHub Actions job that does one trivial read or insert against this
+table. Seconds of runtime; removes the whole failure class.
 
 **Last-write-wins is fine for a cache.** Concurrent weekly runs aren't a concern at
 this scale; the upsert's conflict resolution is sufficient and there's no need for

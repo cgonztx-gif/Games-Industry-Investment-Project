@@ -14,9 +14,15 @@ blocks an egress IP, the blast radius is this one file — nothing downstream ch
   **read-only**, which is exactly what sentiment analysis needs.
 - Two hard constraints shape the design: unauthenticated access is throttled to
   roughly **10 requests/minute, tracked per IP**, and **data-center IPs** (which is
-  what GitHub Actions runners are) are a prime target for blocking. So the adapter
-  is built to (a) stay well under the rate ceiling, (b) cache aggressively, and
+  what GitHub Actions runners are) are a prime target for blocking. Reddit has also
+  been steadily tightening unauthenticated access since 2023, so the design assumes
+  this path can degrade or close without notice. The adapter is therefore built to
+  (a) stay well under the rate ceiling, (b) cache aggressively, and
   (c) **degrade gracefully** rather than crash the weekly run when blocked.
+- This is the **reference implementation of the Tier-2 source pattern** in the
+  project's *Data Source Risk Register* — every unofficial source (yfinance, the
+  Steam `appreviews` endpoint) gets the same interface + rate-limit + cache +
+  degrade treatment.
 
 ## Architecture at a glance
 
@@ -204,11 +210,18 @@ class JsonRedditSource:
 Wraps any source. On a normal run it prevents re-fetching; on a block it serves
 last-known-good rather than returning empty. This is where the resilience lives.
 
+**Serialization boundary (canonical — matches the SupabaseRedditCache doc §4):**
+the cache stores JSON-native `list[dict]` payloads and knows nothing about the
+dataclasses; *this wrapper* owns the dataclass ↔ dict conversion on both sides.
+That keeps the cache generic (reusable for yfinance, Steam reviews, or any other
+adapter) and keeps everything downstream of this wrapper typed.
+
 ```python
+from dataclasses import asdict
 from typing import Protocol
 
 class RedditCache(Protocol):
-    # back this with a Supabase table: key TEXT PK, payload JSONB, fetched_at TIMESTAMPTZ
+    # backed by the generic api_cache table — see the SupabaseRedditCache design doc
     def get(self, key: str, max_age_hours: float | None = None) -> list | None: ...
     def set(self, key: str, value: list) -> None: ...
 
@@ -220,33 +233,38 @@ class CachedRedditSource:
         key = f"posts:{subreddit}:{sort}:{timeframe}"
         fresh = self.cache.get(key, max_age_hours=self.ttl_hours)
         if fresh is not None:
-            return fresh
+            return [RedditPost(**d) for d in fresh]            # dict -> dataclass
         try:
             posts = self.inner.fetch_posts(subreddit, sort, timeframe, limit)
-            self.cache.set(key, posts)
+            self.cache.set(key, [asdict(p) for p in posts])    # dataclass -> dict
             return posts
         except RedditBlocked:
-            stale = self.cache.get(key)            # ignore TTL: stale > empty
+            stale = self.cache.get(key)            # no TTL: stale > empty
             if stale is not None:
                 logger.warning("blocked; serving stale cache for r/%s", subreddit)
-                return stale
+                return [RedditPost(**d) for d in stale]
             raise
 
     def fetch_comments(self, post_id, subreddit, limit=200):
         key = f"comments:{post_id}"
         fresh = self.cache.get(key, max_age_hours=self.ttl_hours)
         if fresh is not None:
-            return fresh
+            return [RedditComment(**d) for d in fresh]
         try:
             cs = self.inner.fetch_comments(post_id, subreddit, limit)
-            self.cache.set(key, cs)
+            self.cache.set(key, [asdict(c) for c in cs])
             return cs
         except RedditBlocked:
             stale = self.cache.get(key)
             if stale is not None:
-                return stale
+                logger.warning("blocked; serving stale comments for %s", post_id)
+                return [RedditComment(**d) for d in stale]
             raise
 ```
+
+`RedditPost(**d)` works because the dataclasses are flat and the dict keys match
+the field names — keep them flat for exactly this reason. If a nested field is
+ever added, switch to a small `from_dict` classmethod.
 
 ## 6. Fallback chain + factory
 
@@ -291,14 +309,23 @@ def build_reddit_source(cache: RedditCache) -> "RedditSource":
 An `AltEgressRedditSource` can often subclass `JsonRedditSource` and only override the
 `session` (e.g. one routed through a residential proxy) — the parsing logic is shared.
 
-## 7. Integration with the Sentiment Subagent (CrewAI)
+## 7. Integration with the Sentiment Subagent (CrewAI at MVP)
 
-Expose the adapter as a thin tool; the agent never sees Reddit specifics.
+Expose the adapter as a thin tool; the agent never sees Reddit specifics. Note the
+cache is constructed with its Supabase credentials from the environment — it has
+required arguments (see the SupabaseRedditCache doc §3), so `SupabaseRedditCache()`
+with no args would fail.
 
 ```python
+import json, os
 from crewai.tools import tool
 
-_source = build_reddit_source(cache=SupabaseRedditCache())
+_cache = SupabaseRedditCache(
+    url=os.environ["SUPABASE_URL"],
+    service_key=os.environ["SUPABASE_SERVICE_KEY"],   # GitHub Actions secret
+    source="reddit",
+)
+_source = build_reddit_source(cache=_cache)
 
 @tool("fetch_reddit_discussion")
 def fetch_reddit_discussion(subreddit: str, top_n_posts: int = 10) -> str:
@@ -312,15 +339,28 @@ def fetch_reddit_discussion(subreddit: str, top_n_posts: int = 10) -> str:
     return json.dumps(blob)   # feeds the VADER baseline + Claude ABSA pass
 ```
 
+After the Claude Agent SDK migration, the same function registers as an SDK custom
+tool — the decorator changes; the adapter, cache, and everything above this section
+do not. That containment is the point of the design.
+
 ---
 
 ## Operational notes
 
-**Request budget.** At ~8s/request + jitter you get ~6–7 req/min, safely under the
-~10/min ceiling. If you map games to ~60 active subreddits and pull 1 listing call +
-comments for the top ~10 posts each (~11 calls/sub), that's ~660 calls ≈ ~90 minutes.
-Fine for a weekly GitHub Actions job (well within job time limits and free-tier
-minutes). Tune `top_n_posts` and which subs get comment fetches to control cost.
+**Request budget — tiered, not flat.** At ~8s/request + jitter you get ~6–7 req/min,
+safely under the ~10/min ceiling. The watchlist maps ~150–300 games to roughly ~60
+active subreddits, but not every sub earns comment fetches. Each game carries a
+**sentiment tier** assigned at seeding (see the brief): Tier A (~25 subs — highest
+portfolio materiality and activity) gets 1 listing call + comments for the top ~10
+posts (~11 calls/sub); the tail gets a listing call only. That's ~25×11 + ~35×1 ≈
+**310 calls ≈ 45 minutes** per weekly run — with a worst case of ~660 calls ≈ ~90
+minutes if every sub were promoted to Tier A. Either figure fits comfortably inside
+GitHub Actions' 6-hour job limit; and because the repo is public (per the brief),
+Actions minutes are unmetered — on a private repo this one step would consume
+10–25% of the free plan's 2,000 monthly minutes. **r/gaming is deliberately
+excluded**: it's a firehose of memes and cross-game noise whose volume would eat
+the budget while diluting per-title signal; game-specific subs carry the alpha.
+Tune `top_n_posts` and tier assignments to control cost.
 
 **The data-center IP risk is the real one.** GitHub Actions runners are data-center IPs,
 exactly what Reddit throttles first. Mitigations, in order of effort: (1) keep volume

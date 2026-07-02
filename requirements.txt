@@ -21,9 +21,8 @@ igdb-api-v4>=0.2.0
 # ============================================================
 # Sentiment (Phase 2)
 # ============================================================
-praw>=7.7.0            # Reddit
 vaderSentiment>=3.3.2  # VADER baseline sentiment scorer
-playwright>=1.40.0     # YouTube comments + Discord scraping
+playwright>=1.40.0     # Low-volume studio careers fallback where hosted ATS APIs are unavailable
 
 # ============================================================
 # Financial data (Phase 3)

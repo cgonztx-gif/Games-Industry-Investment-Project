@@ -1,71 +1,23 @@
-# Games Industry Investment Intelligence Platform
+# Games Industry Investment Intelligence Platform — Design Docs
 
-A multi-agent investment intelligence system that monitors the games industry and synthesizes signals into weekly portfolio briefings.
+A multi-agent system that reads game-level signals (players, sentiment, patch cadence, studio hiring), maps them to public equities, and closes the loop through a human-approved paper-trading portfolio. These five documents are the complete design set. **Last revised: July 2026** (source facts — X API pricing, YouTube quotas, Supabase free-tier behavior, Alpaca MCP — verified as of this revision).
 
-**Core thesis:** Game-level data (player counts, sentiment, patch cadence, studio hiring) leads financial performance by weeks. Traditional investors underweight it.
+## Reading order
 
----
+| # | Document (located in docs) | What it covers | Read it when |
+|---|---|---|---|
+| 1 | **games-investment-platform-brief.md** | System-level overview: components, tech stack, data model, orchestration flow, build phases (with an explicit cut line), resume framing | First — everything else hangs off this |
+| 2 | **agent-components-plan.md** | Per-agent internals: tools, skills (with the analytical frameworks each encodes), subagents, cross-cutting infrastructure, and the SDK↔CrewAI mapping table | Before building any agent |
+| 3 | **data-source-risk-register.md** | Every external source tiered by access path, ToS posture, and block risk — with mandated mitigations, cost math for deferred sources, and named substitutes for excluded ones | Before integrating (or proposing) any data source |
+| 4 | **reddit_source_adapter.md** | The reference Tier-2 source implementation: swappable `RedditSource` interface, rate limiting, retry/backoff, fallback chain, CrewAI tool integration, operational budget | When building the sentiment layer, or any new Tier-2 adapter |
+| 5 | **supabase_reddit_cache.md** | The source-agnostic `api_cache` implementation behind every adapter: fresh/stale TTL semantics, fail-open behavior, serialization boundary, test fake, free-tier operations | Alongside #4 |
 
-## What It Does
+## Conventions that span the set
 
-- Tracks **150–300 games** and **30–50 studios** across player metrics, community sentiment, patch behavior, and organizational signals
-- Synthesizes signals weekly into a portfolio briefing with buy/sell/hold recommendations and risk flags
-- Generates a structured trade plan, surfaces it for **human approval**, then executes via Alpaca paper trading
-- Visualizes everything — sentiment trends, portfolio P&L, trade history with Claude's full reasoning — in a Next.js dashboard
-
----
-
-## Architecture
-
-Eight specialized Claude agents in an orchestrator–worker pattern:
-
-```
-[GitHub Actions: weekly cron]
-        ↓
-[Orchestrator] → dispatches workers in parallel
-  ├── Market & Player Subagent     (Steam/IGDB/RAWG metrics)
-  ├── Sentiment Subagent           (Reddit/X/YouTube/Steam reviews)
-  ├── Patch Notes Subagent         (update cadence analysis)
-  ├── Studio Intelligence Subagent (hiring, layoffs, SEC filings)
-  ├── Financial Overlay Subagent   (yfinance, earnings context)
-  └── Discovery Subagent           (new watchlist proposals)
-        ↓
-[Synthesis Agent]  → weekly briefing
-        ↓
-[Portfolio Manager Agent] → trade plan → human approval → [Execution Agent → Alpaca]
-```
-
-Full design: [`docs/games-investment-platform-brief.md`](docs/games-investment-platform-brief.md)  
-Agent internals: [`docs/agent-components-plan.md`](docs/agent-components-plan.md)
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Agent orchestration | CrewAI (MVP) → LangGraph / Claude Agent SDK |
-| LLM | Claude API (Anthropic) |
-| Database | Supabase (PostgreSQL) |
-| Scheduling | GitHub Actions |
-| Frontend | Next.js 16 + shadcn/ui + Recharts |
-| Observability | LangSmith |
-| Paper trading | Alpaca API |
-
----
-
-## Build Phases
-
-- [x] **Phase 0** — Planning docs
-- [ ] **Phase 1** — Foundation + Watchlist Seeding ← _current_
-- [ ] **Phase 2** — Sentiment Layer
-- [ ] **Phase 3** — Studio & Financial Intelligence
-- [ ] **Phase 4** — Synthesis Agent & Briefing
-- [ ] **Phase 5** — Discovery Agent
-- [ ] **Phase 6** — Dashboard Polish
-- [ ] **Phase 7** — Portfolio Manager + Alpaca Execution
-
----
+- **Framework vocabulary:** specs are written in Claude Agent SDK terms (skills, subagents, hooks) because that's the target; the MVP ships on CrewAI. The mapping table in doc #2 defines every equivalence, and nothing in the design depends on a primitive that lacks one. Safety-critical checks (the pre-trade guard) live *in tool code*, so they hold under either framework.
+- **Divergence check ownership:** the text-vs-quant divergence comparison — the system's alpha — is computed by the **Synthesis Agent**, because workers run parallel and isolated and only synthesis sees all same-week outputs. The Sentiment Subagent produces the inputs (and at most a clearly-labeled lagged preliminary flag).
+- **Source discipline:** any new external source enters through the risk register (doc #3) first. Tier 2 sources always get the adapter + cache + graceful-degradation treatment that docs #4–5 implement.
+- **Honest scoping:** paid or ToS-risky integrations (X, LinkedIn, Discord) are deferred or excluded *explicitly*, with cost math, revisit criteria, and named substitutes — never silently assumed free.
 
 ## Setup
 

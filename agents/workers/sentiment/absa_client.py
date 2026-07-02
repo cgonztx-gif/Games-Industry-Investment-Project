@@ -1,4 +1,5 @@
 import json
+import re
 import anthropic
 
 _MODEL = "claude-haiku-4-5-20251001"
@@ -53,6 +54,11 @@ def run_absa(game_title: str, source: str, texts: list[str]) -> list[dict]:
             messages=[{"role": "user", "content": prompt}],
         )
         raw = msg.content[0].text.strip()
+        # Strip markdown fences if the model includes them despite the instruction
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)
+            raw = re.sub(r"\n?```.*$", "", raw, flags=re.DOTALL)
+            raw = raw.strip()
         data = json.loads(raw)
         aspects = data.get("aspects") or []
         # Sort by mention_count desc, take top 3, strip mention_count before returning

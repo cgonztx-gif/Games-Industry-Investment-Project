@@ -45,6 +45,8 @@ ehthumbs.db
 *.log
 logs/
 langsmith_traces/
+.rawg_backfill_state.json
+.rawg_backfill_state.json.tmp
 
 # Supabase local
 .supabase/
