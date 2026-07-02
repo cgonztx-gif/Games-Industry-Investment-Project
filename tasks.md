@@ -49,9 +49,10 @@
 - [x] Wire sentiment task in `agents/orchestrator/crew.py` (`task_sentiment`)
 - [x] Apply `database/migrations/001_sentiment_snapshots_unique.sql` in Supabase SQL Editor (required before first run)
 - [x] Apply `database/migrations/002_api_cache.sql` in Supabase SQL Editor (required before first Reddit adapter run)
-- [ ] Apply `database/migrations/003_watchlist_sentiment_targets.sql` in Supabase SQL Editor
-- [ ] Apply `database/migrations/004_patch_events_source_url.sql` in Supabase SQL Editor
-- [ ] Apply `database/migrations/005_equity_signals.sql` in Supabase SQL Editor
+- [x] Apply `database/migrations/003_watchlist_sentiment_targets.sql` in Supabase SQL Editor
+- [x] Apply `database/migrations/004_patch_events_source_url.sql` in Supabase SQL Editor
+- [x] Apply `database/migrations/005_equity_signals.sql` in Supabase SQL Editor
+- [x] Apply `database/migrations/006_patch_events_cadence_flags.sql` in Supabase SQL Editor (cadence status/baseline + monetization-without-content columns)
 
 ### RAWG backfill
 - [x] Build standalone RAWG backfill script — `scripts/rawg_backfill.py` (resumable, `--dry-run` / `--limit` / `--offset` / `--fix-steam` flags)
@@ -79,7 +80,7 @@
 - [x] Add official Greenhouse / Lever / Ashby job-board API clients to `studio_intel` worker
 - [x] Add Playwright fallback only for studios without hosted ATS boards
 - [x] Add hiring-signal taxonomy: role-type spikes → intent mapping
-- [ ] Add distress indicator scoring (layoffs, exec departures, consolidation)
+- [x] Add distress indicator scoring (layoffs, exec departures, consolidation) — fixed 8-K item `2.06` mapping (was mislabeled `press_release`/medium, now `impairment`/high per the org-health-signal-analysis severity table); added `escalate_for_repeat_distress()` in `edgar_client.py` to bump severity to `high` when a studio has a prior layoffs/impairment signal in the trailing 12 months (`count_recent_studio_signals()` in `db_client.py`)
 
 ### Skills
 - [x] Write `agents/skills/live-service-health-analysis/SKILL.md` — CCU/DAU/MAU KPI framework, retention benchmarks, genre baselines, bundled delta/rolling-avg script

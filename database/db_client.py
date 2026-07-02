@@ -324,6 +324,21 @@ def write_sentiment_snapshot(client: Client, snapshot: dict) -> None:
     ).execute()
 
 
+def count_recent_studio_signals(
+    client: Client, studio_id: str, signal_type: str, since_date: str
+) -> int:
+    """Count studio_signals rows of a given type for a studio since a date (for repeat-distress escalation)."""
+    resp = (
+        client.table("studio_signals")
+        .select("id", count="exact")
+        .eq("studio_id", studio_id)
+        .eq("signal_type", signal_type)
+        .gte("date", since_date)
+        .execute()
+    )
+    return resp.count or 0
+
+
 def write_studio_signal(client: Client, signal: dict) -> bool:
     """
     Insert one studio_signals row. Returns True if inserted, False if already exists.

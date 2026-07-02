@@ -19,11 +19,17 @@ _ITEM_MAP: dict[str, tuple[str, str]] = {
     "1.01": ("press_release", "low"),
     "2.01": ("acquisition", "high"),
     "2.05": ("layoffs", "high"),
-    "2.06": ("press_release", "medium"),
+    "2.06": ("impairment", "high"),
     "5.01": ("acquisition", "high"),
     "5.02": ("exec_departure", "medium"),
     "8.01": ("press_release", "low"),
 }
+
+# Distress signal types where a repeat occurrence for the same studio is a
+# materially stronger warning than an isolated event (org-health-signal-analysis
+# skill: "Layoffs ... repeated rounds: High").
+DISTRESS_ESCALATION_SIGNAL_TYPES = {"layoffs", "impairment"}
+DISTRESS_LOOKBACK_DAYS = 365
 
 
 def load_cik_map() -> dict[str, int]:
@@ -104,3 +110,19 @@ def classify_8k(items_raw: str) -> tuple[str, str]:
                 best_severity = severity
 
     return best_type, best_severity
+
+
+def escalate_for_repeat_distress(
+    signal_type: str, severity: str, prior_occurrences: int
+) -> tuple[str, str | None]:
+    """
+    Escalate severity when a distress signal type has recurred for this studio
+    within the trailing lookback window. Returns (severity, escalation_note);
+    note is None when no escalation applied.
+    """
+    if signal_type not in DISTRESS_ESCALATION_SIGNAL_TYPES or prior_occurrences < 1:
+        return severity, None
+    if severity == "high":
+        return severity, None
+    note = f"escalated: {prior_occurrences + 1} {signal_type} signals in trailing 12 months"
+    return "high", note

@@ -7,7 +7,7 @@ a Playwright careers-page fallback). Writes structured rows to studio_signals.
 """
 
 import time
-from datetime import date
+from datetime import date, timedelta
 
 from agents.workers.studio_intel.ats_clients import (
     fetch_configured_jobs,
@@ -15,11 +15,19 @@ from agents.workers.studio_intel.ats_clients import (
     summarize_hiring_signal,
 )
 from agents.workers.studio_intel.edgar_client import (
+    DISTRESS_ESCALATION_SIGNAL_TYPES,
+    DISTRESS_LOOKBACK_DAYS,
     classify_8k,
+    escalate_for_repeat_distress,
     get_recent_8k_filings,
     load_cik_map,
 )
-from database.db_client import get_client, get_studios_with_tickers, write_studio_signal
+from database.db_client import (
+    count_recent_studio_signals,
+    get_client,
+    get_studios_with_tickers,
+    write_studio_signal,
+)
 
 _DAYS_BACK = 60
 _REQUEST_DELAY = 0.12  # stay well under EDGAR's 10 req/sec limit
@@ -39,6 +47,7 @@ def run() -> dict:
     signals_written = 0
     skipped_no_cik = 0
     ats_checked = 0
+    distress_escalations = 0
     errors: list[dict] = []
 
     for item in studios:
@@ -58,7 +67,24 @@ def run() -> dict:
 
                 for filing in filings:
                     signal_type, severity = classify_8k(filing["items_raw"])
+
+                    escalation_note = None
+                    if signal_type in DISTRESS_ESCALATION_SIGNAL_TYPES:
+                        since_date = (
+                            date.fromisoformat(filing["date"]) - timedelta(days=DISTRESS_LOOKBACK_DAYS)
+                        ).isoformat()
+                        prior_occurrences = count_recent_studio_signals(
+                            db, studio_id, signal_type, since_date
+                        )
+                        severity, escalation_note = escalate_for_repeat_distress(
+                            signal_type, severity, prior_occurrences
+                        )
+
                     description = f"8-K filing - items: {filing['items_raw']}"
+                    if escalation_note:
+                        description += f" ({escalation_note})"
+                        distress_escalations += 1
+
                     written = write_studio_signal(
                         db,
                         {
@@ -110,6 +136,7 @@ def run() -> dict:
     print(
         f"[studio_intel] Complete - {studios_checked} EDGAR checks, "
         f"{ats_checked} ATS boards checked, {signals_written} signals written, "
+        f"{distress_escalations} distress escalations, "
         f"{skipped_no_cik} skipped (no CIK), {len(errors)} errors."
     )
 
@@ -118,6 +145,7 @@ def run() -> dict:
         "studios_checked": studios_checked,
         "ats_boards_checked": ats_checked,
         "signals_written": signals_written,
+        "distress_escalations": distress_escalations,
         "skipped_no_cik": skipped_no_cik,
         "error_count": len(errors),
         "errors": errors,
