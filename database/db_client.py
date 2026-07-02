@@ -163,7 +163,7 @@ def get_watchlist_games(client: Client) -> list[dict]:
         client.table("watchlist")
         .select(
             "id, game_id, sentiment_tier, subreddit, "
-            "games(game_id, title, steam_app_id, igdb_id)"
+            "games(game_id, title, steam_app_id, igdb_id, genre, release_date, is_live_service)"
         )
         .eq("active", True)
         .execute()

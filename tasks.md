@@ -12,6 +12,7 @@
 - [x] CrewAI crew scaffolded with placeholder agents (`agents/orchestrator/crew.py`)
 - [x] GitHub Actions weekly cron wired (`.github/workflows/weekly.yml`)
 - [ ] Add GitHub Actions repo secrets: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`, `RAWG_API_KEY`, `STEAM_API_KEY`
+- [ ] On any new clone/machine, create a local `.env` before running workers: pull `SUPABASE_URL` and the `service_role` key (not `anon` — worker writes need RLS bypass) from Supabase dashboard → Settings → API, plus the other Phase 1/2 vars. Note: `CLAUDE.md` references copying `.env.example`, but that file does not currently exist in the repo — create `.env` directly until one is added.
 
 ---
 
@@ -69,7 +70,7 @@
 - [x] Integrate Steam news API (`ISteamNews/GetNewsForApp`) per title
 - [ ] Add `web_fetch` for developer blogs and official patch pages
 - [x] Implement patch classification taxonomy: hotfix / balance / content_drop / monetization / engine / other
-- [ ] Implement cadence baseline comparison (flag slowing or absent patches)
+- [x] Implement cadence baseline comparison (flag slowing or absent patches) — `_resolve_baseline_days()`/`_cadence_status()` in `worker.py`, genre-aware for live-service titles, persisted via migration `006_patch_events_cadence_flags.sql`
 - [x] Implement monetization-without-content flag
 - [x] Wire patch notes worker into `run_weekly.py`
 - [x] Wire patch notes task in `agents/orchestrator/crew.py` (replace placeholder)
@@ -81,10 +82,10 @@
 - [ ] Add distress indicator scoring (layoffs, exec departures, consolidation)
 
 ### Skills
-- [ ] Write `agents/skills/live-service-health-analysis/SKILL.md` — CCU/DAU/MAU KPI framework, retention benchmarks, genre baselines, bundled delta/rolling-avg script
-- [ ] Write `agents/skills/patch-cadence-analysis/SKILL.md` — update rhythm baselines, monetization flag logic, roadmap-adherence tracking
-- [ ] Write `agents/skills/org-health-signal-analysis/SKILL.md` — hiring taxonomy, distress indicators, leadership-stability index, acquisition/IPO detection
-- [ ] Write `agents/skills/equity-signal-mapping/SKILL.md` — studio→ticker resolution, materiality weighting, pre-earnings window logic, correlation tracking
+- [x] Write `agents/skills/live-service-health-analysis/SKILL.md` — CCU/DAU/MAU KPI framework, retention benchmarks, genre baselines, bundled delta/rolling-avg script
+- [x] Write `agents/skills/patch-cadence-analysis/SKILL.md` — update rhythm baselines, monetization flag logic, roadmap-adherence tracking
+- [x] Write `agents/skills/org-health-signal-analysis/SKILL.md` — hiring taxonomy, distress indicators, leadership-stability index, acquisition/IPO detection
+- [x] Write `agents/skills/equity-signal-mapping/SKILL.md` — studio→ticker resolution, materiality weighting, pre-earnings window logic, correlation tracking
 
 ---
 
@@ -95,7 +96,7 @@
 - [x] Implement divergence-opportunity logic (vocal-minority guard integration)
 - [x] Implement confidence scoring for conflicting signals
 - [ ] Build `deep-dive-researcher` subagent dispatch (web access, returns short findings summary)
-- [ ] Write `agents/skills/investment-synthesis-framework/SKILL.md` — convergence/divergence rules, confidence scoring, briefing template
+- [x] Write `agents/skills/investment-synthesis-framework/SKILL.md` — convergence/divergence rules, confidence scoring, briefing template
 - [ ] Integrate LangSmith tracing across all agent runs
 - [ ] Set up email delivery for weekly briefing (SendGrid or similar)
 - [x] Wire synthesis agent into `run_weekly.py`
@@ -109,7 +110,7 @@
 - [ ] Configure Alpaca MCP server for Portfolio Manager tool calls
 - [ ] Build `agents/portfolio/manager.py` — reads weekly briefing + current Alpaca positions → produces trade plan → `trade_plans`
 - [ ] Build minimal trade-plan approval UI or CLI flow before enabling execution
-- [ ] Write `agents/skills/position-sizing-and-risk/SKILL.md` — max position size %, conviction-tier sizing, concentration limits, stop-loss / thesis-invalidation rules, benchmark-relative framing
+- [x] Write `agents/skills/position-sizing-and-risk/SKILL.md` — max position size %, conviction-tier sizing, concentration limits, stop-loss / thesis-invalidation rules, benchmark-relative framing
 - [x] Build `agents/portfolio/execution_agent.py` — thin subagent, Alpaca tools only, reads approved `trade_orders` and places them
 - [x] Implement in-tool Alpaca pre-trade guard — `place_approved_order()` re-reads `status = 'approved'` in Supabase before placing orders
 - [ ] Implement Returns Tracker — fetch Alpaca portfolio state weekly, compute return vs. S&P 500, write to `portfolio_snapshots`
@@ -127,7 +128,7 @@
 - [ ] Integrate Reddit mention-volume spike detection for untracked titles
 - [ ] Implement Claude rationale generation per proposal (investment-relevance justification)
 - [ ] Implement false-positive learning (read rejection log to tighten criteria)
-- [ ] Write `agents/skills/watchlist-relevance-scoring/SKILL.md` — relevance criteria rubric, trigger thresholds, rationale template
+- [x] Write `agents/skills/watchlist-relevance-scoring/SKILL.md` — relevance criteria rubric, trigger thresholds, rationale template
 - [ ] Wire discovery worker into `run_weekly.py`
 - [ ] Wire discovery task in `agents/orchestrator/crew.py` (replace placeholder)
 
@@ -156,7 +157,7 @@
 - [ ] Add LangSmith tracing to all agent runs (token spend per subagent, full trace tree)
 - [ ] Add per-subagent token-spend logging via lifecycle hooks
 - [ ] Add graceful error recovery to workers (retry on transient API errors, degrade rather than crash)
-- [ ] Lock model per-agent in all crew/agent configs — verify no agent defaults to most capable
+- [x] Lock model per-agent in all crew/agent configs — verify no agent defaults to most capable (audited 2026-07-02: `crew.py` workers on `claude-sonnet-4-6`, orchestrator on `claude-opus-4-8`, ABSA on `claude-haiku-4-5-20251001`, all explicit; synthesis/execution agents make no direct LLM calls. Not-yet-built `agents/portfolio/manager.py` will need its Opus-class lock added when it's implemented.)
 - [ ] Add `YOUTUBE_API_KEY` to `.env` and GitHub Actions secrets once the YouTube Data API collector is enabled
 - [ ] Add `database/migrations/` pattern — write a migration for any future schema change rather than modifying `schema.sql` directly
 

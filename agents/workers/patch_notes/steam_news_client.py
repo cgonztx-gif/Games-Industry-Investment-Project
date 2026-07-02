@@ -20,6 +20,16 @@ _PATCH_KEYWORDS = {
     "maintenance",
 }
 
+_CONTENT_DROP_KEYWORDS = {
+    "season",
+    "map",
+    "mode",
+    "event",
+    "dlc",
+    "expansion",
+    "content",
+}
+
 
 def _clean_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", " ", text or "")
@@ -36,7 +46,7 @@ def classify_patch(title: str, contents: str) -> str:
         return "monetization"
     if any(term in blob for term in ("engine", "performance", "crash", "stability", "renderer")):
         return "engine"
-    if any(term in blob for term in ("season", "map", "mode", "event", "dlc", "expansion", "content")):
+    if any(term in blob for term in _CONTENT_DROP_KEYWORDS):
         return "content_drop"
     return "other"
 
@@ -44,6 +54,12 @@ def classify_patch(title: str, contents: str) -> str:
 def looks_like_update(title: str, contents: str) -> bool:
     blob = f"{title} {contents}".lower()
     return any(keyword in blob for keyword in _PATCH_KEYWORDS)
+
+
+def has_content_indicators(title: str, contents: str) -> bool:
+    """True if the patch text mentions any content-drop signal (map/mode/season/DLC/etc.)."""
+    blob = f"{title} {contents}".lower()
+    return any(term in blob for term in _CONTENT_DROP_KEYWORDS)
 
 
 def get_recent_news(
