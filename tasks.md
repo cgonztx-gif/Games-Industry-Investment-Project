@@ -96,7 +96,7 @@
 - [x] Implement convergence signal logic (multi-layer bearish/bullish scoring)
 - [x] Implement divergence-opportunity logic (vocal-minority guard integration)
 - [x] Implement confidence scoring for conflicting signals
-- [ ] Build `deep-dive-researcher` subagent dispatch (web access, returns short findings summary)
+- [x] Build `deep-dive-researcher` subagent dispatch (web access, returns short findings summary)
 - [x] Write `agents/skills/investment-synthesis-framework/SKILL.md` — convergence/divergence rules, confidence scoring, briefing template
 - [ ] Integrate LangSmith tracing across all agent runs
 - [ ] Set up email delivery for weekly briefing (SendGrid or similar)

@@ -10,7 +10,10 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 
+from agents.synthesis.deep_dive import run_deep_dive
 from database.db_client import get_client, get_weekly_outputs, write_weekly_briefing
+
+_MAX_DEEP_DIVES_PER_WEEK = 2
 
 
 def _avg(values: list[float]) -> float | None:
@@ -150,6 +153,79 @@ def _confidence(outputs: dict) -> str:
     return "very_low"
 
 
+def _high_severity_game_ids(risks: list[dict]) -> set[str]:
+    return {r["game_id"] for r in risks if r.get("severity") == "high" and r.get("game_id")}
+
+
+def _game_titles(db, game_ids: list[str]) -> dict[str, str]:
+    if not game_ids:
+        return {}
+    rows = (
+        db.table("games")
+        .select("game_id,title")
+        .in_("game_id", game_ids)
+        .execute()
+        .data
+        or []
+    )
+    return {row["game_id"]: row["title"] for row in rows}
+
+
+def _dispatch_deep_dives(
+    divergences: list[dict],
+    risks: list[dict],
+    game_titles: dict[str, str],
+    deep_dive_fn=run_deep_dive,
+    max_dives: int = _MAX_DEEP_DIVES_PER_WEEK,
+) -> list[str]:
+    """
+    Trigger condition, per investment-synthesis-framework SKILL.md section
+    "Deep-Dive Researcher Triggers": dispatch "only for bounded questions that
+    can change the briefing." This operationalizes two of that section's six
+    documented triggers together -- "Sudden sentiment collapse with stable
+    quant" (the bearish_text_stable_quant divergence type) co-occurring with a
+    "severe risk flag" (a high-severity entry in _compute_risks for the same
+    game_id) -- rather than firing on every divergence, consistent with the
+    skill's framing that this is not a fishing expedition. Capped at
+    `max_dives` per week as an additional bound on cost/latency.
+
+    Mutates matching divergence dicts in place (adds "deep_dive_triggered" and
+    "deep_dive" keys) so callers see the annotation through both `divergences`
+    and the `opportunities` sublist (same dict objects). Never raises --
+    `deep_dive_fn` already returns None on any internal failure.
+    """
+    high_severity = _high_severity_game_ids(risks)
+    dispatched = 0
+    notes: list[str] = []
+
+    for item in divergences:
+        if dispatched >= max_dives:
+            break
+        if item.get("type") != "bearish_text_stable_quant":
+            continue
+        game_id = item.get("game_id")
+        if game_id not in high_severity:
+            continue
+        title = game_titles.get(game_id)
+        if not title:
+            continue
+
+        question = (
+            f'Is the sentiment drop for "{title}" this week explained by a specific '
+            "controversy, a recent patch/balance change, or something else? Cite sources."
+        )
+        item["deep_dive_triggered"] = True
+        result = deep_dive_fn(title, question)
+        item["deep_dive"] = result
+        dispatched += 1
+        notes.append(
+            f"Deep dive dispatched for {title} ({game_id}): "
+            + ("findings returned" if result else "no findings (failed, refused, or unparseable)")
+        )
+
+    return notes
+
+
 def run(run_date: str | None = None) -> dict:
     db = get_client()
     today = date.fromisoformat(run_date) if run_date else date.today()
@@ -158,6 +234,17 @@ def run(run_date: str | None = None) -> dict:
 
     divergences = _compute_divergence(outputs)
     risks = _compute_risks(outputs)
+
+    deep_dive_notes: list[str] = []
+    try:
+        bearish_game_ids = [
+            d["game_id"] for d in divergences if d["type"] == "bearish_text_stable_quant"
+        ]
+        game_titles = _game_titles(db, bearish_game_ids)
+        deep_dive_notes = _dispatch_deep_dives(divergences, risks, game_titles)
+    except Exception as exc:
+        print(f"[synthesis] deep-dive dispatch skipped due to error: {exc}")
+
     confidence = _confidence(outputs)
     opportunities = [
         item for item in divergences if item["type"] == "bearish_text_stable_quant"
@@ -178,6 +265,8 @@ def run(run_date: str | None = None) -> dict:
         "computed text-vs-quant divergence against same-date player metrics, "
         "then layered patch activity and studio signals into risk flags."
     )
+    if deep_dive_notes:
+        reasoning_log += " " + " ".join(deep_dive_notes)
     briefing_text = (
         f"Weekly briefing for {today.isoformat()}: confidence={confidence}; "
         f"{len(divergences)} divergence signal(s), {len(risks)} risk flag(s), "
