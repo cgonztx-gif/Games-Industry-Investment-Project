@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import date, timedelta
 
 from agents.synthesis.deep_dive import run_deep_dive
+from agents.synthesis.email_delivery import send_briefing_email
 from database.db_client import get_client, get_weekly_outputs, write_weekly_briefing
 
 _MAX_DEEP_DIVES_PER_WEEK = 2
@@ -283,6 +284,11 @@ def run(run_date: str | None = None) -> dict:
         "reasoning_log": reasoning_log,
     }
     write_weekly_briefing(db, briefing)
+
+    try:
+        send_briefing_email(briefing)
+    except Exception as exc:
+        print(f"[synthesis] briefing email skipped due to error: {exc}")
 
     print(f"[synthesis] {briefing_text}")
     return {

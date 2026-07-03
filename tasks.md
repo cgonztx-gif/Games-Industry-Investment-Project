@@ -99,7 +99,7 @@
 - [x] Build `deep-dive-researcher` subagent dispatch (web access, returns short findings summary)
 - [x] Write `agents/skills/investment-synthesis-framework/SKILL.md` — convergence/divergence rules, confidence scoring, briefing template
 - [x] Integrate LangSmith tracing across all agent runs (`agents/tracing.py`, wired into `run_weekly.py`; opt-in, no-op without `LANGSMITH_API_KEY`)
-- [ ] Set up email delivery for weekly briefing (SendGrid or similar)
+- [x] Set up email delivery for weekly briefing (SendGrid or similar) — built via Resend's free tier per `docs/games-investment-platform-brief.md:344`; see `agents/synthesis/email_delivery.py` (opt-in, no-op without `RESEND_API_KEY`/`BRIEFING_EMAIL_TO`)
 - [x] Wire synthesis agent into `run_weekly.py`
 
 ---

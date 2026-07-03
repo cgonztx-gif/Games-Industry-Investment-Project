@@ -88,6 +88,10 @@ Copy `.env.example` to `.env`. Required per phase:
 **Phase 4 (observability, optional):**
 - `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` — the pipeline runs identically with tracing fully disabled (no-op, zero network calls) if these are unset.
 
+**Phase 4 (briefing email delivery, optional):**
+- `RESEND_API_KEY`, `BRIEFING_EMAIL_TO` — the briefing still writes to Supabase with email delivery fully skipped (no-op, zero network calls) if either is unset. `BRIEFING_EMAIL_TO` may be a single address or a comma-separated list.
+- `BRIEFING_EMAIL_FROM` — optional sender override; defaults to Resend's sandbox sender (`onboarding@resend.dev`), which only delivers to the Resend account owner's own address until a custom domain is verified.
+
 **Later phases:**
 - `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`
 
@@ -120,6 +124,9 @@ The sentiment worker runs a two-pass pipeline per game:
 
 ### Tracing internals (`agents/tracing.py`)
 `configure_tracing()` is called once at the very start of `run_weekly.py`'s pipeline run. Each worker/synthesis/crew call is wrapped via `traced_step(name)(callable)()` at the `run_weekly.py` call site — not via decorators inside each worker file, to avoid touching every worker module. The one real LLM call site (`agents/workers/sentiment/absa_client.py`) is instrumented via `langsmith.wrappers.wrap_anthropic`, which captures token usage automatically. Fully opt-in: everything no-ops with zero network calls when `LANGSMITH_API_KEY` is unset.
+
+### Briefing email delivery (`agents/synthesis/email_delivery.py`)
+`send_briefing_email(briefing)` is called from `agents/synthesis/agent.py`'s `run()` immediately after `write_weekly_briefing(db, briefing)`, wrapped in a try/except so an email failure can never prevent the briefing from being considered "done." Renders a plain HTML summary (briefing text + bullet lists for top opportunities / risk flags / notable events) and POSTs it directly to Resend's REST API (`POST https://api.resend.com/emails`) via `requests` — no `resend` SDK dependency. Fully opt-in: no-ops with zero network calls when `RESEND_API_KEY` or `BRIEFING_EMAIL_TO` is unset, and any HTTP failure is caught and logged rather than raised.
 
 ### External data caching design
 `docs/supabase_reddit_cache.md` specifies a generic `api_cache` table (`source TEXT, key TEXT, payload JSONB, fetched_at TIMESTAMPTZ`) that backs Tier-2 source adapters. The table schema and TTL semantics are documented there; apply migrations before running volatile-source collectors.
