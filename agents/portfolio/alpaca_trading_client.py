@@ -85,8 +85,12 @@ def place_approved_order(db, order_id: str) -> dict:
         )
 
     action = trade.get("action")
+    if action == "hold":
+        # A 'hold' is a deliberate no-trade decision the portfolio manager may
+        # persist for the record; there is nothing to place at Alpaca for it.
+        return {"status": "no_action", "reason": "hold orders are not placed"}
     if action not in {"buy", "sell"}:
-        raise ValueError(f"trade_order {order_id} action must be buy or sell")
+        raise ValueError(f"trade_order {order_id} action must be buy, sell, or hold")
 
     base_url = os.environ.get("ALPACA_BASE_URL") or _DEFAULT_PAPER_BASE
     payload = {

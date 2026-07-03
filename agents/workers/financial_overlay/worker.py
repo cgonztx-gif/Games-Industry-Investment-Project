@@ -29,7 +29,10 @@ def run() -> dict:
         studio_id = item.get("studio_id")
         try:
             snap = get_equity_snapshot(ticker, cache=cache)
-            official_price = get_latest_price(ticker)
+            try:
+                official_price = get_latest_price(ticker)
+            except Exception:
+                official_price = None
             current_price = official_price if official_price is not None else snap["price"]
             current_signal = (
                 f"{item.get('tracked_games', 0)} tracked games across "

@@ -63,6 +63,13 @@ if __name__ == "__main__":
         print("\n" + "=" * 60)
         print("=== Weekly CrewAI Pipeline ===")
         print("=" * 60)
-        result = traced_step("games_intel_crew_kickoff", run_type="chain")(games_intel_crew.kickoff)()
-        print("\nPipeline complete.")
-        print(str(result).encode(sys.stdout.encoding, errors="replace").decode(sys.stdout.encoding))
+        try:
+            result = traced_step("games_intel_crew_kickoff", run_type="chain")(games_intel_crew.kickoff)()
+            print("\nPipeline complete.")
+            print(str(result).encode(sys.stdout.encoding, errors="replace").decode(sys.stdout.encoding))
+        except Exception as exc:
+            # This crew is a placeholder confirmation pass with no durable output of
+            # its own (see agents/orchestrator/crew.py) -- the weekly briefing above
+            # has already been written, so a failure here must not mark the whole
+            # run as failed.
+            print(f"\n[run_weekly] CrewAI placeholder pipeline failed (non-fatal): {exc}")

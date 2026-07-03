@@ -293,19 +293,37 @@ def get_studios_with_tickers(client: Client) -> list[dict]:
 # RAWG backfill helpers
 # ---------------------------------------------------------------------------
 
+_RAWG_MISSING_PAGE_SIZE = 1000
+
+
 def get_games_missing_rawg(client: Client, limit: int = 0, offset: int = 0) -> list[dict]:
-    """Return games where rawg_slug IS NULL, ordered by title. Paginated via limit/offset."""
-    q = (
+    """
+    Return games where rawg_slug IS NULL, ordered by title. Paginated via limit/offset.
+
+    When limit=0 (the "full run" default), this pages through the backlog in
+    chunks of _RAWG_MISSING_PAGE_SIZE rather than issuing a single unranged
+    query, which Supabase/PostgREST would otherwise silently cap at its
+    default page size instead of returning the full backlog.
+    """
+    base_query = lambda: (
         client.table("games")
         .select("game_id, title, release_date, steam_app_id")
         .is_("rawg_slug", "null")
         .order("title")
     )
-    if offset:
-        q = q.range(offset, offset + (limit or 10_000) - 1)
-    elif limit:
-        q = q.limit(limit)
-    return q.execute().data
+
+    if limit:
+        return base_query().range(offset, offset + limit - 1).execute().data
+
+    results: list[dict] = []
+    page_offset = offset
+    while True:
+        rows = base_query().range(page_offset, page_offset + _RAWG_MISSING_PAGE_SIZE - 1).execute().data or []
+        results.extend(rows)
+        if len(rows) < _RAWG_MISSING_PAGE_SIZE:
+            break
+        page_offset += _RAWG_MISSING_PAGE_SIZE
+    return results
 
 
 def update_game_rawg_data(client: Client, game_id: str, updates: dict) -> None:

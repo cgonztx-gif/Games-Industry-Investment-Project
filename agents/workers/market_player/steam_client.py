@@ -196,7 +196,12 @@ def get_app_metrics(
     except Exception:
         logger.warning("current-player fetch failed for app %s", steam_app_id, exc_info=True)
 
-    summary = get_review_summary(steam_app_id, cache=review_cache)
+    summary: dict = {}
+    try:
+        summary = get_review_summary(steam_app_id, cache=review_cache)
+    except Exception:
+        logger.warning("review summary fetch failed for app %s", steam_app_id, exc_info=True)
+
     return {
         "ccu": ccu,
         "review_score": summary.get("review_score"),

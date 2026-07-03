@@ -61,7 +61,7 @@ create table if not exists player_metrics (
   date             date not null,
   concurrent_players integer,
   peak_players_24h   integer,
-  review_score       numeric(4,2),  -- e.g. 87.5
+  review_score       numeric(5,2),  -- e.g. 87.5; up to 100.00
   review_count       integer,
   review_velocity    integer,       -- new reviews in the period
   created_at         timestamptz default now(),

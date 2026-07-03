@@ -232,14 +232,16 @@ class JsonRedditSource:
                 )
 
     def resolve_subreddit(self, game_title: str) -> str | None:
-        """Search Reddit for the best-matching subreddit (similarity >= 0.70)."""
-        try:
-            data = self._get(
-                "/subreddits/search.json",
-                params={"q": game_title, "limit": 5},
-            )
-        except RedditBlocked:
-            return None
+        """
+        Search Reddit for the best-matching subreddit (similarity >= 0.70).
+        Raises RedditBlocked on throttle/block instead of swallowing it, so
+        callers (cached_resolve_subreddit) can tell a transient failure apart
+        from a confirmed no-match and avoid caching the former as the latter.
+        """
+        data = self._get(
+            "/subreddits/search.json",
+            params={"q": game_title, "limit": 5},
+        )
 
         normalized = _normalize(game_title)
         best_name: str | None = None
@@ -381,7 +383,10 @@ def cached_resolve_subreddit(
     for 30 days so we don't re-query ~3k games on every weekly run.
 
     Stores [display_name] on a hit, [] on a confirmed no-match — so both
-    positive and negative results are cached and won't be re-queried.
+    positive and negative results are cached and won't be re-queried. Raises
+    RedditBlocked on throttle/block instead: that's a transient failure, not a
+    confirmed no-match, so it must not be cached or persisted as one (callers
+    should catch it and simply retry on a later run).
     """
     key = _normalize(game_title)
     cached = lookup_cache.get(key, max_age_hours=_LOOKUP_TTL_HOURS)

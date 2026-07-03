@@ -12,7 +12,7 @@
 - [x] CrewAI crew scaffolded with placeholder agents (`agents/orchestrator/crew.py`)
 - [x] GitHub Actions weekly cron wired (`.github/workflows/weekly.yml`)
 - [ ] Add GitHub Actions repo secrets: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`, `RAWG_API_KEY`, `STEAM_API_KEY`
-- [ ] On any new clone/machine, create a local `.env` before running workers: pull `SUPABASE_URL` and the `service_role` key (not `anon` — worker writes need RLS bypass) from Supabase dashboard → Settings → API, plus the other Phase 1/2 vars. Note: `CLAUDE.md` references copying `.env.example`, but that file does not currently exist in the repo — create `.env` directly until one is added.
+- [x] `.env.example` added — on any new clone/machine, `cp .env.example .env` then pull `SUPABASE_URL` and the `service_role` key (not `anon` — worker writes need RLS bypass) from Supabase dashboard → Settings → API, plus fill in the other per-phase vars.
 
 ---
 

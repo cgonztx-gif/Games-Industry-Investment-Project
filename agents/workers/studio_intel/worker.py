@@ -40,7 +40,11 @@ def run() -> dict:
     studios = get_studios_with_tickers(db)
     print(f"[studio_intel] {len(studios)} public tickers to check")
 
-    cik_map = load_cik_map()
+    try:
+        cik_map = load_cik_map()
+    except Exception as exc:
+        print(f"[studio_intel] EDGAR CIK map fetch failed, skipping EDGAR checks this run: {exc}")
+        cik_map = {}
     ats_board_map = load_ats_board_map()
 
     studios_checked = 0
