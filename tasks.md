@@ -53,6 +53,7 @@
 - [x] Apply `database/migrations/004_patch_events_source_url.sql` in Supabase SQL Editor
 - [x] Apply `database/migrations/005_equity_signals.sql` in Supabase SQL Editor
 - [x] Apply `database/migrations/006_patch_events_cadence_flags.sql` in Supabase SQL Editor (cadence status/baseline + monetization-without-content columns)
+- [ ] Apply `database/migrations/007_player_metrics_review_score_precision.sql` in Supabase SQL Editor (widens `review_score` to `numeric(5,2)` so a perfect 100.00 review score doesn't fail the upsert — added 2026-07-03 alongside the code fix in `steam_client.py`/`worker.py`; not confirmed applied yet)
 
 ### RAWG backfill
 - [x] Build standalone RAWG backfill script — `scripts/rawg_backfill.py` (resumable, `--dry-run` / `--limit` / `--offset` / `--fix-steam` flags)

@@ -11,9 +11,14 @@ The implemented system is currently a Python/Supabase data pipeline with a CrewA
 - `agents/workers/financial_overlay/worker.py` writes Alpaca/yfinance equity snapshots to `equity_signals`.
 - `agents/workers/studio_intel/worker.py` writes recent SEC EDGAR 8-K signals to `studio_signals`.
 - `agents/workers/sentiment/worker.py` writes Steam/Reddit `.json` sentiment snapshots to `sentiment_snapshots`.
-- `run_weekly.py` runs the worker modules first, then starts the CrewAI summary pipeline.
+- `agents/workers/patch_notes/worker.py` merges official Steam News with developer-blog/RSS entries (`blog_client.py`) into `patch_events`.
+- `agents/synthesis/agent.py` reads all same-week worker outputs, computes the divergence check, dispatches a bounded `deep_dive.py` research call when a signal warrants it, writes `weekly_briefings`, and sends an optional Resend email (`email_delivery.py`).
+- `agents/portfolio/manager.py` reads the latest briefing plus Alpaca account state and calls Claude Opus (`claude-opus-4-8`) to produce a trade plan, written to `trade_plans`/`trade_orders` at `status='pending'`.
+- `scripts/review_trade_plans.py` is the human-in-the-loop CLI that approves/rejects those pending plans/orders — nothing reaches `agents/portfolio/execution_agent.py` without going through it first.
+- `agents/tracing.py` wraps every worker/synthesis/crew call in `run_weekly.py` as a LangSmith span, fully opt-in and a no-op without `LANGSMITH_API_KEY`.
+- `run_weekly.py` runs the worker modules and synthesis first, then starts the CrewAI summary pipeline (still placeholder confirmation tasks, not real logic).
 
-Planned but not yet implemented: discovery worker, portfolio manager, returns tracker, Next.js dashboard, LangSmith tracing, and most `agents/skills/*/SKILL.md` methodology files.
+All `agents/skills/*/SKILL.md` methodology files are now written. Planned but not yet implemented: discovery worker, returns tracker, Next.js dashboard, and wiring the Portfolio Manager + execution agent into `run_weekly.py` (currently run manually) plus live paper-trading validation on a real Alpaca account.
 
 ## Source Of Truth
 
@@ -70,6 +75,13 @@ Run the full weekly pipeline:
 python run_weekly.py
 ```
 
+Review and approve/reject pending trade plans (manual, not wired into `run_weekly.py`):
+
+```powershell
+python scripts/review_trade_plans.py list
+python scripts/review_trade_plans.py approve --plan <plan_id>
+```
+
 ## Environment Variables
 
 Required for current pipeline work:
@@ -86,10 +98,15 @@ Optional/current sentiment expansion:
 
 - `YOUTUBE_API_KEY` once the YouTube Data API collector is enabled
 
+Optional, no-op-safe if unset (pipeline behaves identically without them):
+
+- `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` for tracing (`agents/tracing.py`).
+- `RESEND_API_KEY`, `BRIEFING_EMAIL_TO`, `BRIEFING_EMAIL_FROM` for briefing email delivery (`agents/synthesis/email_delivery.py`).
+- `GAME_PATCH_PAGES` for the patch_notes developer-blog source (`agents/workers/patch_notes/blog_client.py`).
+
 Future phases:
 
-- `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` for tracing.
-- `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, and `ALPACA_BASE_URL` for paper trading.
+- `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, and `ALPACA_BASE_URL` for paper trading — `agents/portfolio/manager.py` and `execution_agent.py` are built and tested against fakes, but not yet exercised against a real Alpaca account.
 
 Never print `.env` contents or secrets in responses.
 
@@ -99,7 +116,7 @@ Never print `.env` contents or secrets in responses.
 - `scripts/rawg_backfill.py` sleeps three seconds per RAWG request and is intentionally slow to respect the free-tier limit. Use `--limit`, `--offset`, and `--fix-steam` for resumable passes.
 - `sentiment_snapshots` upserts require `database/migrations/001_sentiment_snapshots_unique.sql` to be applied in Supabase.
 - Tier-2 caching requires `database/migrations/002_api_cache.sql` to be applied in Supabase.
-- Watchlist sentiment targeting, patch event idempotency, and equity signals require migrations `003` through `005`.
+- Watchlist sentiment targeting, patch event idempotency, and equity signals require migrations `003` through `005`. Migration `006` adds patch cadence status/baseline columns. Migration `007` (`player_metrics.review_score` precision fix) exists but is not confirmed applied yet.
 - GitHub Actions uses `.github/workflows/weekly.yml`; repo secrets still need to be configured externally.
 - Avoid reading or displaying `.env`. It exists locally and contains sensitive values.
 
