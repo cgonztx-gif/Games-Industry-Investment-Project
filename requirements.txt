@@ -41,3 +41,8 @@ langsmith>=0.1.0
 python-dotenv>=1.0.0   # load .env files
 pydantic>=2.0.0        # structured output validation
 httpx>=0.25.0          # async HTTP
+
+# ============================================================
+# Testing
+# ============================================================
+pytest>=8.0.0           # unit tests (see tests/)

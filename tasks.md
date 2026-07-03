@@ -69,7 +69,7 @@
 ### Patch Notes worker
 - [x] Build `agents/workers/patch_notes/worker.py` — update cadence analysis → `patch_events`
 - [x] Integrate Steam news API (`ISteamNews/GetNewsForApp`) per title
-- [ ] Add `web_fetch` for developer blogs and official patch pages
+- [x] Add `web_fetch` for developer blogs and official patch pages — `agents/workers/patch_notes/blog_client.py` (RSS/Atom + HTML fallback, cached via `database/api_cache.py`, configured via `GAME_PATCH_PAGES`); merged into `worker.py`'s existing cadence loop
 - [x] Implement patch classification taxonomy: hotfix / balance / content_drop / monetization / engine / other
 - [x] Implement cadence baseline comparison (flag slowing or absent patches) — `_resolve_baseline_days()`/`_cadence_status()` in `worker.py`, genre-aware for live-service titles, persisted via migration `006_patch_events_cadence_flags.sql`
 - [x] Implement monetization-without-content flag

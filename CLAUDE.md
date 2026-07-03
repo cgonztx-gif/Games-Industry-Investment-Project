@@ -82,6 +82,9 @@ Copy `.env.example` to `.env`. Required per phase:
 - No Reddit OAuth credentials are required. Reddit collection uses public read-only `.json` endpoints through `agents/workers/sentiment/reddit_source.py` and `api_cache`.
 - `YOUTUBE_API_KEY` is required once the YouTube Data API comment collector is enabled.
 
+**Phase 3 (patch_notes worker, optional):**
+- `GAME_PATCH_PAGES` — optional JSON object mapping a watchlist game's exact `games.title` to one or more developer-blog/official patch-page URLs (string or list of strings), e.g. `{"Fortnite": ["https://www.fortnite.com/news/rss"]}`. Loaded defensively (missing/invalid → `{}`) by `agents/workers/patch_notes/blog_client.py`; most games won't have one configured. Same manually-curated-config convention as `STUDIO_ATS_BOARDS` (`agents/workers/studio_intel/ats_clients.py`).
+
 **Later phases:**
 - `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`
 - `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`

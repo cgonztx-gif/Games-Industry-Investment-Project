@@ -1,14 +1,21 @@
 """
 Patch Notes Worker - Phase 3
 
-Uses the official Steam News API (ISteamNews/GetNewsForApp) to collect recent
-patch/update posts for Steam-linked watchlist games and writes cadence events to
-patch_events.
+Uses the official Steam News API (ISteamNews/GetNewsForApp) plus manually
+curated developer-blog / official patch-page URLs (GAME_PATCH_PAGES) to
+collect recent patch/update posts for watchlist games and writes cadence
+events to patch_events.
 """
 
 from datetime import date
 
+from agents.workers.patch_notes.blog_client import (
+    CachedBlogSource,
+    get_recent_entries,
+    load_game_patch_pages,
+)
 from agents.workers.patch_notes.steam_news_client import get_recent_news, has_content_indicators
+from database.api_cache import SupabaseApiCache
 from database.db_client import (
     get_client,
     get_last_patch_event,
@@ -69,8 +76,16 @@ def _cadence_status(cadence_delta: int | None, baseline_days: int, is_live_servi
 
 def run() -> dict:
     db = get_client()
-    games = [game for game in get_watchlist_games(db) if game.get("steam_app_id")]
-    print(f"[patch_notes] {len(games)} Steam-linked games to check")
+    all_games = get_watchlist_games(db)
+    patch_pages = load_game_patch_pages()
+    blog_source = CachedBlogSource(SupabaseApiCache(client=db, source="dev_blog"))
+
+    games = [
+        game
+        for game in all_games
+        if game.get("steam_app_id") or patch_pages.get(game.get("title", ""))
+    ]
+    print(f"[patch_notes] {len(games)} games to check (Steam-linked and/or blog-configured)")
 
     games_checked = 0
     events_written = 0
@@ -82,48 +97,69 @@ def run() -> dict:
     for i, game in enumerate(games, 1):
         game_id = game["game_id"]
         title = game.get("title", "unknown")
-        steam_app_id = game["steam_app_id"]
+        steam_app_id = game.get("steam_app_id")
         is_live_service = game.get("is_live_service", False)
         baseline_days = _resolve_baseline_days(game.get("genre"), is_live_service)
 
-        try:
-            news_items = get_recent_news(steam_app_id, days_back=_DAYS_BACK)
-            games_checked += 1
-            last_event = get_last_patch_event(db, game_id)
-            previous_date = last_event.get("date") if last_event else None
+        news_items: list[dict] = []
+        any_source_succeeded = False
 
-            for item in news_items:
-                cadence_delta = _days_between(previous_date, item["date"])
-                cadence_status = _cadence_status(cadence_delta, baseline_days, is_live_service)
-                monetization_without_content = item["patch_type"] == "monetization" and not (
-                    has_content_indicators(item["title"], item["contents"])
+        if steam_app_id:
+            try:
+                news_items.extend(get_recent_news(steam_app_id, days_back=_DAYS_BACK))
+                any_source_succeeded = True
+            except Exception as exc:
+                errors.append(
+                    {"title": title, "source": "steam_news", "steam_app_id": steam_app_id, "error": str(exc)}
                 )
-                written = write_patch_event(
-                    db,
-                    {
-                        "game_id": game_id,
-                        "date": item["date"],
-                        "patch_type": item["patch_type"],
-                        "scope_summary": f"{item['title']} - {item['contents'][:500]}",
-                        "cadence_delta": cadence_delta,
-                        "cadence_status": cadence_status,
-                        "cadence_baseline_days": baseline_days,
-                        "monetization_without_content": monetization_without_content,
-                        "source_url": item.get("url"),
-                    },
-                )
-                previous_date = item["date"]
-                if written:
-                    events_written += 1
-                    if cadence_status == "slowing":
-                        cadence_slowing += 1
-                    elif cadence_status == "absent":
-                        cadence_absent += 1
-                    if monetization_without_content:
-                        monetization_without_content_count += 1
 
-        except Exception as exc:
-            errors.append({"title": title, "steam_app_id": steam_app_id, "error": str(exc)})
+        for blog_url in patch_pages.get(title, []):
+            try:
+                news_items.extend(get_recent_entries(blog_source, blog_url, days_back=_DAYS_BACK))
+                any_source_succeeded = True
+            except Exception as exc:
+                errors.append({"title": title, "source": "dev_blog", "url": blog_url, "error": str(exc)})
+
+        if not any_source_succeeded:
+            if i % 25 == 0:
+                print(f"  [{i}/{len(games)}] checked")
+            continue
+
+        games_checked += 1
+        news_items.sort(key=lambda item: item["date"])
+
+        last_event = get_last_patch_event(db, game_id)
+        previous_date = last_event.get("date") if last_event else None
+
+        for item in news_items:
+            cadence_delta = _days_between(previous_date, item["date"])
+            cadence_status = _cadence_status(cadence_delta, baseline_days, is_live_service)
+            monetization_without_content = item["patch_type"] == "monetization" and not (
+                has_content_indicators(item["title"], item["contents"])
+            )
+            written = write_patch_event(
+                db,
+                {
+                    "game_id": game_id,
+                    "date": item["date"],
+                    "patch_type": item["patch_type"],
+                    "scope_summary": f"{item['title']} - {item['contents'][:500]}",
+                    "cadence_delta": cadence_delta,
+                    "cadence_status": cadence_status,
+                    "cadence_baseline_days": baseline_days,
+                    "monetization_without_content": monetization_without_content,
+                    "source_url": item.get("url"),
+                },
+            )
+            previous_date = item["date"]
+            if written:
+                events_written += 1
+                if cadence_status == "slowing":
+                    cadence_slowing += 1
+                elif cadence_status == "absent":
+                    cadence_absent += 1
+                if monetization_without_content:
+                    monetization_without_content_count += 1
 
         if i % 25 == 0:
             print(f"  [{i}/{len(games)}] checked")
