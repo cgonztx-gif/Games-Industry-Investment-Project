@@ -98,7 +98,7 @@
 - [x] Implement confidence scoring for conflicting signals
 - [x] Build `deep-dive-researcher` subagent dispatch (web access, returns short findings summary)
 - [x] Write `agents/skills/investment-synthesis-framework/SKILL.md` — convergence/divergence rules, confidence scoring, briefing template
-- [ ] Integrate LangSmith tracing across all agent runs
+- [x] Integrate LangSmith tracing across all agent runs (`agents/tracing.py`, wired into `run_weekly.py`; opt-in, no-op without `LANGSMITH_API_KEY`)
 - [ ] Set up email delivery for weekly briefing (SendGrid or similar)
 - [x] Wire synthesis agent into `run_weekly.py`
 
@@ -155,7 +155,7 @@
 ## Cross-Cutting / Infrastructure
 
 - [ ] Add `LANGSMITH_API_KEY` and `LANGSMITH_PROJECT` to `.env` and GitHub secrets
-- [ ] Add LangSmith tracing to all agent runs (token spend per subagent, full trace tree)
+- [x] Add LangSmith tracing to all agent runs (token spend per subagent, full trace tree) — `agents/tracing.py` + `run_weekly.py` root span, per-worker `traced_step` spans, `wrap_anthropic` on the ABSA client for token usage
 - [ ] Add per-subagent token-spend logging via lifecycle hooks
 - [ ] Add graceful error recovery to workers (retry on transient API errors, degrade rather than crash)
 - [x] Lock model per-agent in all crew/agent configs — verify no agent defaults to most capable (audited 2026-07-02: `crew.py` workers on `claude-sonnet-4-6`, orchestrator on `claude-opus-4-8`, ABSA on `claude-haiku-4-5-20251001`, all explicit; synthesis/execution agents make no direct LLM calls. Not-yet-built `agents/portfolio/manager.py` will need its Opus-class lock added when it's implemented.)

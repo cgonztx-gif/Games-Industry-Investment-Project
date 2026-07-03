@@ -85,9 +85,11 @@ Copy `.env.example` to `.env`. Required per phase:
 **Phase 3 (patch_notes worker, optional):**
 - `GAME_PATCH_PAGES` — optional JSON object mapping a watchlist game's exact `games.title` to one or more developer-blog/official patch-page URLs (string or list of strings), e.g. `{"Fortnite": ["https://www.fortnite.com/news/rss"]}`. Loaded defensively (missing/invalid → `{}`) by `agents/workers/patch_notes/blog_client.py`; most games won't have one configured. Same manually-curated-config convention as `STUDIO_ATS_BOARDS` (`agents/workers/studio_intel/ats_clients.py`).
 
+**Phase 4 (observability, optional):**
+- `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` — the pipeline runs identically with tracing fully disabled (no-op, zero network calls) if these are unset.
+
 **Later phases:**
 - `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL`
-- `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`
 
 ---
 
@@ -115,6 +117,9 @@ The sentiment worker runs a two-pass pipeline per game:
 - **ABSA** (`absa_client.py`) — Claude Haiku extracts aspect→polarity pairs (e.g. `monetization → negative`); skipped if fewer than 5 texts; top 3 aspects returned
 - **Preliminary lagged flag** (`divergence.py`) — optional hint against the latest stored player metrics; authoritative same-week divergence belongs in synthesis
 - **Reddit source** (`reddit_source.py`, `reddit_cache.py`) — unauthenticated public `.json` adapter with rate limiting, Supabase-backed `api_cache`, and stale fallback. No PRAW/OAuth path is used.
+
+### Tracing internals (`agents/tracing.py`)
+`configure_tracing()` is called once at the very start of `run_weekly.py`'s pipeline run. Each worker/synthesis/crew call is wrapped via `traced_step(name)(callable)()` at the `run_weekly.py` call site — not via decorators inside each worker file, to avoid touching every worker module. The one real LLM call site (`agents/workers/sentiment/absa_client.py`) is instrumented via `langsmith.wrappers.wrap_anthropic`, which captures token usage automatically. Fully opt-in: everything no-ops with zero network calls when `LANGSMITH_API_KEY` is unset.
 
 ### External data caching design
 `docs/supabase_reddit_cache.md` specifies a generic `api_cache` table (`source TEXT, key TEXT, payload JSONB, fetched_at TIMESTAMPTZ`) that backs Tier-2 source adapters. The table schema and TTL semantics are documented there; apply migrations before running volatile-source collectors.

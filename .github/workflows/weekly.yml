@@ -27,4 +27,6 @@ jobs:
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           RAWG_API_KEY:         ${{ secrets.RAWG_API_KEY }}
           STEAM_API_KEY:        ${{ secrets.STEAM_API_KEY }}
+          LANGSMITH_API_KEY:    ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT:    ${{ secrets.LANGSMITH_PROJECT }}
         run: python run_weekly.py

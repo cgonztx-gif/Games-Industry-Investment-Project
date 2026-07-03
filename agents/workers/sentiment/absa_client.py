@@ -1,9 +1,10 @@
 import json
 import re
 import anthropic
+from langsmith.wrappers import wrap_anthropic
 
 _MODEL = "claude-haiku-4-5-20251001"
-_client = anthropic.Anthropic()
+_client = wrap_anthropic(anthropic.Anthropic())
 
 _SYSTEM = (
     "You are a game industry analyst extracting aspect-based sentiment from player reviews. "
