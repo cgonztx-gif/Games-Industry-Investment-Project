@@ -110,7 +110,7 @@
 - [ ] Add `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` to `.env` and GitHub secrets
 - [ ] Configure Alpaca MCP server for Portfolio Manager tool calls
 - [x] Build `agents/portfolio/manager.py` — reads weekly briefing + current Alpaca positions → produces trade plan → `trade_plans`
-- [ ] Build minimal trade-plan approval UI or CLI flow before enabling execution
+- [x] Build minimal trade-plan approval UI or CLI flow before enabling execution
 - [x] Write `agents/skills/position-sizing-and-risk/SKILL.md` — max position size %, conviction-tier sizing, concentration limits, stop-loss / thesis-invalidation rules, benchmark-relative framing
 - [x] Build `agents/portfolio/execution_agent.py` — thin subagent, Alpaca tools only, reads approved `trade_orders` and places them
 - [x] Implement in-tool Alpaca pre-trade guard — `place_approved_order()` re-reads `status = 'approved'` in Supabase before placing orders

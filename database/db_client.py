@@ -529,3 +529,53 @@ def attach_alpaca_order_id(client: Client, order_id: str, alpaca_order_id: str) 
     client.table("trade_orders").update(
         {"alpaca_order_id": alpaca_order_id}
     ).eq("order_id", order_id).execute()
+
+
+_REVIEW_STATUSES = ("approved", "rejected")
+
+
+def get_pending_trade_plans(client: Client) -> list[dict]:
+    """Return all trade_plans rows with status='pending', most recent week_of first."""
+    resp = (
+        client.table("trade_plans")
+        .select("*")
+        .eq("status", "pending")
+        .order("week_of", desc=True)
+        .execute()
+    )
+    return resp.data or []
+
+
+def get_trade_orders_for_plan(client: Client, plan_id: str) -> list[dict]:
+    """Return all trade_orders rows for a given plan_id."""
+    resp = (
+        client.table("trade_orders")
+        .select("*")
+        .eq("plan_id", plan_id)
+        .execute()
+    )
+    return resp.data or []
+
+
+def set_trade_plan_status(client: Client, plan_id: str, status: str) -> None:
+    """
+    Update a trade_plans row's status and reviewed_at. Only 'approved'/'rejected'
+    are valid -- this must never be usable to reset a plan back to 'pending'.
+    """
+    if status not in _REVIEW_STATUSES:
+        raise ValueError(f"status must be one of {_REVIEW_STATUSES}, got {status!r}")
+    client.table("trade_plans").update(
+        {"status": status, "reviewed_at": datetime.now(timezone.utc).isoformat()}
+    ).eq("plan_id", plan_id).execute()
+
+
+def set_trade_order_status(client: Client, order_id: str, status: str) -> None:
+    """
+    Update a single trade_orders row's status. Only 'approved'/'rejected' are
+    valid -- this must never be usable to reset an order back to 'pending'.
+    """
+    if status not in _REVIEW_STATUSES:
+        raise ValueError(f"status must be one of {_REVIEW_STATUSES}, got {status!r}")
+    client.table("trade_orders").update({"status": status}).eq(
+        "order_id", order_id
+    ).execute()

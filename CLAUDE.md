@@ -158,6 +158,13 @@ python scripts/rawg_backfill.py --chunk-size 100 --max-chunks 5  # run up to fiv
 python scripts/rawg_backfill.py                            # full run
 python scripts/rawg_backfill.py --limit 50 --offset 200    # manual page
 
+# Review pending trade plans/orders before execution (human-in-the-loop; sets DB status only, never places orders)
+python scripts/review_trade_plans.py list
+python scripts/review_trade_plans.py approve --plan <plan_id>   # cascades to all pending orders under the plan
+python scripts/review_trade_plans.py reject --plan <plan_id>
+python scripts/review_trade_plans.py approve --order <order_id> # per-order override; does not touch the parent plan
+python scripts/review_trade_plans.py reject --order <order_id>
+
 # Test an individual worker
 python -c "import sys; sys.path.insert(0, '.'); from dotenv import load_dotenv; load_dotenv(); from agents.workers.market_player import worker; import json; print(json.dumps(worker.run(), indent=2))"
 
