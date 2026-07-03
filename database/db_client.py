@@ -462,6 +462,29 @@ def write_weekly_briefing(client: Client, briefing: dict) -> None:
 # Portfolio / execution helpers
 # ---------------------------------------------------------------------------
 
+def get_latest_weekly_briefing(client: Client) -> Optional[dict]:
+    """Return the most recent weekly_briefings row (by week_of), or None if empty."""
+    resp = (
+        client.table("weekly_briefings")
+        .select("*")
+        .order("week_of", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def write_trade_plan(client: Client, plan: dict) -> str:
+    """Insert one trade_plans row (status left at its schema default 'pending'). Returns plan_id."""
+    resp = client.table("trade_plans").insert(plan).execute()
+    return resp.data[0]["plan_id"]
+
+
+def write_trade_order(client: Client, order: dict) -> None:
+    """Insert one trade_orders row. Status must be left at its schema default 'pending'."""
+    client.table("trade_orders").insert(order).execute()
+
+
 def get_trade_order(client: Client, order_id: str) -> Optional[dict]:
     resp = (
         client.table("trade_orders")

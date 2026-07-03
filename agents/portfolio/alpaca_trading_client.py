@@ -23,6 +23,52 @@ def _headers() -> dict:
     }
 
 
+def get_account_state() -> dict:
+    """
+    Fetch current Alpaca paper-trading account state: cash, buying power,
+    portfolio value, and open positions.
+
+    Hits GET /v2/account and GET /v2/positions (field names verified against
+    Alpaca's TradeAccount/Position models: cash/buying_power/portfolio_value
+    on the account, symbol/qty/market_value on each position -- all returned
+    by Alpaca as decimal strings, coerced to float here).
+
+    Raises the same way `_headers()` already does today (KeyError) if
+    ALPACA_API_KEY / ALPACA_SECRET_KEY are unset, and raises
+    requests.HTTPError on a non-2xx response. Callers (e.g. the portfolio
+    manager) are responsible for catching and degrading gracefully -- this
+    function does not swallow errors.
+    """
+    base_url = os.environ.get("ALPACA_BASE_URL") or _DEFAULT_PAPER_BASE
+    headers = _headers()
+
+    account_resp = requests.get(
+        f"{base_url.rstrip('/')}/v2/account", headers=headers, timeout=20
+    )
+    account_resp.raise_for_status()
+    account = account_resp.json()
+
+    positions_resp = requests.get(
+        f"{base_url.rstrip('/')}/v2/positions", headers=headers, timeout=20
+    )
+    positions_resp.raise_for_status()
+    positions = positions_resp.json()
+
+    return {
+        "cash": float(account["cash"]),
+        "buying_power": float(account["buying_power"]),
+        "portfolio_value": float(account["portfolio_value"]),
+        "positions": [
+            {
+                "ticker": p["symbol"],
+                "qty": float(p["qty"]),
+                "market_value": float(p["market_value"]),
+            }
+            for p in positions
+        ],
+    }
+
+
 def place_approved_order(db, order_id: str) -> dict:
     """
     Place one Alpaca paper order after re-reading Supabase approval status.

@@ -109,7 +109,7 @@
 - [ ] Create Alpaca paper trading account and generate API keys
 - [ ] Add `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` to `.env` and GitHub secrets
 - [ ] Configure Alpaca MCP server for Portfolio Manager tool calls
-- [ ] Build `agents/portfolio/manager.py` — reads weekly briefing + current Alpaca positions → produces trade plan → `trade_plans`
+- [x] Build `agents/portfolio/manager.py` — reads weekly briefing + current Alpaca positions → produces trade plan → `trade_plans`
 - [ ] Build minimal trade-plan approval UI or CLI flow before enabling execution
 - [x] Write `agents/skills/position-sizing-and-risk/SKILL.md` — max position size %, conviction-tier sizing, concentration limits, stop-loss / thesis-invalidation rules, benchmark-relative framing
 - [x] Build `agents/portfolio/execution_agent.py` — thin subagent, Alpaca tools only, reads approved `trade_orders` and places them
@@ -158,7 +158,7 @@
 - [x] Add LangSmith tracing to all agent runs (token spend per subagent, full trace tree) — `agents/tracing.py` + `run_weekly.py` root span, per-worker `traced_step` spans, `wrap_anthropic` on the ABSA client for token usage
 - [ ] Add per-subagent token-spend logging via lifecycle hooks
 - [ ] Add graceful error recovery to workers (retry on transient API errors, degrade rather than crash)
-- [x] Lock model per-agent in all crew/agent configs — verify no agent defaults to most capable (audited 2026-07-02: `crew.py` workers on `claude-sonnet-4-6`, orchestrator on `claude-opus-4-8`, ABSA on `claude-haiku-4-5-20251001`, all explicit; synthesis/execution agents make no direct LLM calls. Not-yet-built `agents/portfolio/manager.py` will need its Opus-class lock added when it's implemented.)
+- [x] Lock model per-agent in all crew/agent configs — verify no agent defaults to most capable (audited 2026-07-03: `crew.py` workers on `claude-sonnet-4-6`, orchestrator on `claude-opus-4-8`, ABSA on `claude-haiku-4-5-20251001`, all explicit; synthesis/execution agents make no direct LLM calls. `agents/portfolio/manager.py` is now implemented and locked to `claude-opus-4-8` per the Opus-class tier.)
 - [ ] Add `YOUTUBE_API_KEY` to `.env` and GitHub Actions secrets once the YouTube Data API collector is enabled
 - [ ] Add `database/migrations/` pattern — write a migration for any future schema change rather than modifying `schema.sql` directly
 
