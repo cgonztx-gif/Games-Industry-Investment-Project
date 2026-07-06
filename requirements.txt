@@ -3,6 +3,10 @@
 # ============================================================
 crewai>=0.28.0
 anthropic>=0.40.0
+# Phase 5 Portfolio Manager + Execution Agent: Claude Agent SDK for MCP tool-calling
+# (portfolio manager gets a read-only Alpaca MCP tool; execution agent dispatches
+# through a custom guarded MCP tool). Bundles the mcp Python SDK as a dependency.
+claude-agent-sdk>=0.2.0
 
 # ============================================================
 # Database

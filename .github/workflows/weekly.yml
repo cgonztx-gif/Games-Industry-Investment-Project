@@ -32,4 +32,7 @@ jobs:
           RESEND_API_KEY:       ${{ secrets.RESEND_API_KEY }}
           BRIEFING_EMAIL_TO:    ${{ secrets.BRIEFING_EMAIL_TO }}
           BRIEFING_EMAIL_FROM:  ${{ secrets.BRIEFING_EMAIL_FROM }}
+          ALPACA_API_KEY:       ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY:    ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_BASE_URL:      ${{ secrets.ALPACA_BASE_URL }}
         run: python run_weekly.py

@@ -1,46 +1,51 @@
 """
-Unit tests for agents/portfolio/manager.py.
+Unit tests for agents/portfolio/manager.py (Claude Agent SDK + MCP migration).
 
-No live network and no real Anthropic/Supabase/Alpaca calls: build_trade_plan()
-takes injectable `client`, `db`, and function overrides for
-get_latest_weekly_briefing / get_account_state / write_trade_plan /
-write_trade_order, so every test uses fakes with scripted behavior (same
-dependency-injection style as tests/test_deep_dive.py and
-agents/synthesis/agent.py's `_dispatch_deep_dives(deep_dive_fn=...)`).
+No live network and no real Anthropic/Supabase/Alpaca/CLI calls. build_trade_plan()
+takes an injectable ``run_agent_fn`` (the LLM-session seam that replaced the old
+``client``) plus function overrides for get_latest_weekly_briefing /
+get_account_state / write_trade_plan / write_trade_order, so every test uses fakes
+with scripted behavior (same dependency-injection style as tests/test_deep_dive.py
+and agents/synthesis/agent.py's `_dispatch_deep_dives(deep_dive_fn=...)`).
+
+The account tool's graceful-degradation behaviour is unit-tested directly against
+``agents.portfolio.alpaca_mcp.account_state_text`` -- in the migrated architecture
+account state is delivered through the read-only MCP tool result, not pre-fetched
+into the user prompt.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from agents.portfolio.alpaca_mcp import account_state_text
 from agents.portfolio.manager import build_trade_plan
 
 _FAKE_DB = "fake-db-sentinel"  # never touched directly; only passed through to fakes
 
 
-class FakeAnthropicClient:
-    def __init__(self, response=None, exc=None):
-        self._response = response
+class FakeAgentRunner:
+    """
+    Stands in for the real Agent SDK session. Records the prompts/config it was
+    called with and returns scripted assistant text (or raises), mirroring the old
+    FakeAnthropicClient but for the ``run_agent_fn(system_prompt=..., user_prompt=
+    ..., mcp_servers=..., allowed_tools=..., model=...) -> str | None`` seam.
+    """
+
+    def __init__(self, response_text=None, exc=None):
+        self._text = response_text
         self._exc = exc
-        self.messages = SimpleNamespace(create=self._create)
         self.last_kwargs = None
 
-    def _create(self, **kwargs):
+    def __call__(self, **kwargs):
         self.last_kwargs = kwargs
         if self._exc:
             raise self._exc
-        return self._response
-
-
-def _text_response(text: str, stop_reason: str = "end_turn"):
-    return SimpleNamespace(
-        stop_reason=stop_reason,
-        content=[SimpleNamespace(type="text", text=text)],
-    )
+        return self._text
 
 
 _FAKE_BRIEFING = {
@@ -114,10 +119,10 @@ def _account_state_ok():
 
 def test_no_briefing_returns_none():
     writers = _FakeDBWriters()
-    client = FakeAnthropicClient(response=_text_response(_VALID_PLAN_JSON))
+    runner = FakeAgentRunner(response_text=_VALID_PLAN_JSON)
 
     result = build_trade_plan(
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=lambda db: None,
         get_account_state_fn=_account_state_ok,
@@ -128,15 +133,16 @@ def test_no_briefing_returns_none():
     assert result is None
     assert writers.plan_calls == []
     assert writers.order_calls == []
+    assert runner.last_kwargs is None  # never reached the LLM session
 
 
 def test_valid_plan_writes_plan_and_orders():
     writers = _FakeDBWriters(plan_id="plan-abc")
-    client = FakeAnthropicClient(response=_text_response(_VALID_PLAN_JSON))
+    runner = FakeAgentRunner(response_text=_VALID_PLAN_JSON)
 
     result = build_trade_plan(
         run_date="2026-06-29",
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
         get_account_state_fn=_account_state_ok,
@@ -166,22 +172,26 @@ def test_valid_plan_writes_plan_and_orders():
     assert order_row["size_usd"] == 3000.0
     assert "status" not in order_row  # must stay at schema default 'pending', never 'approved'
 
-    # Claude was asked with the skill content + briefing content in the prompt
-    sent_system = client.last_kwargs["system"]
-    assert "Output Contract" in sent_system
-    sent_user = client.last_kwargs["messages"][0]["content"]
-    assert "2026-06-29" in sent_user
+    # The session got the skill content as system prompt + briefing content in the user
+    # prompt, and was pinned to exactly the read-only Alpaca tool + the Opus model.
+    assert "Output Contract" in runner.last_kwargs["system_prompt"]
+    assert "2026-06-29" in runner.last_kwargs["user_prompt"]
+    assert runner.last_kwargs["allowed_tools"] == [
+        "mcp__alpaca-readonly__get_account_state"
+    ]
+    assert runner.last_kwargs["model"] == "claude-opus-4-8"
+    assert "alpaca-readonly" in runner.last_kwargs["mcp_servers"]
 
 
 def test_account_state_unavailable_still_produces_plan():
     writers = _FakeDBWriters(plan_id="plan-xyz")
-    client = FakeAnthropicClient(response=_text_response(_VALID_PLAN_JSON))
+    runner = FakeAgentRunner(response_text=_VALID_PLAN_JSON)
 
     def _account_state_fails():
         raise RuntimeError("no credentials")
 
     result = build_trade_plan(
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
         get_account_state_fn=_account_state_fails,
@@ -189,19 +199,37 @@ def test_account_state_unavailable_still_produces_plan():
         write_trade_order_fn=writers.write_trade_order,
     )
 
+    # A failing account fetch must not fail the run: the read-only tool degrades to
+    # an "UNAVAILABLE -- build conservatively" note, and a plan is still produced.
     assert result is not None
     assert result["plan_id"] == "plan-xyz"
-    sent_user = client.last_kwargs["messages"][0]["content"]
-    assert "UNAVAILABLE" in sent_user
-    assert "no credentials" in sent_user
 
 
-def test_refusal_stop_reason_returns_none():
+def test_account_state_text_degrades_gracefully_on_failure():
+    """The graceful-degradation note (formerly inlined in the user prompt) now lives
+    in the read-only MCP tool's result text -- assert it directly."""
+
+    def _account_state_fails():
+        raise RuntimeError("no credentials")
+
+    text = account_state_text(_account_state_fails)
+    assert "UNAVAILABLE" in text
+    assert "no credentials" in text
+
+
+def test_account_state_text_returns_json_on_success():
+    text = account_state_text(_account_state_ok)
+    parsed = json.loads(text)
+    assert parsed["cash"] == 10000.0
+
+
+def test_refusal_or_error_returns_none():
+    # The default runner returns None on a refusal/error; model that here.
     writers = _FakeDBWriters()
-    client = FakeAnthropicClient(response=_text_response("", stop_reason="refusal"))
+    runner = FakeAgentRunner(response_text=None)
 
     result = build_trade_plan(
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
         get_account_state_fn=_account_state_ok,
@@ -216,10 +244,10 @@ def test_refusal_stop_reason_returns_none():
 
 def test_malformed_json_returns_none():
     writers = _FakeDBWriters()
-    client = FakeAnthropicClient(response=_text_response("not valid json"))
+    runner = FakeAgentRunner(response_text="not valid json")
 
     result = build_trade_plan(
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
         get_account_state_fn=_account_state_ok,
@@ -233,10 +261,10 @@ def test_malformed_json_returns_none():
 
 def test_missing_orders_key_returns_none():
     writers = _FakeDBWriters()
-    client = FakeAnthropicClient(response=_text_response('{"portfolio_risk_posture": "balanced"}'))
+    runner = FakeAgentRunner(response_text='{"portfolio_risk_posture": "balanced"}')
 
     result = build_trade_plan(
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
         get_account_state_fn=_account_state_ok,
@@ -247,12 +275,12 @@ def test_missing_orders_key_returns_none():
     assert result is None
 
 
-def test_client_exception_returns_none():
+def test_runner_exception_returns_none():
     writers = _FakeDBWriters()
-    client = FakeAnthropicClient(exc=RuntimeError("network error"))
+    runner = FakeAgentRunner(exc=RuntimeError("network error"))
 
     result = build_trade_plan(
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
         get_account_state_fn=_account_state_ok,
@@ -267,10 +295,10 @@ def test_client_exception_returns_none():
 def test_markdown_fenced_json_is_stripped():
     writers = _FakeDBWriters(plan_id="plan-fenced")
     fenced = "```json\n" + _VALID_PLAN_JSON + "\n```"
-    client = FakeAnthropicClient(response=_text_response(fenced))
+    runner = FakeAgentRunner(response_text=fenced)
 
     result = build_trade_plan(
-        client=client,
+        run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
         get_account_state_fn=_account_state_ok,

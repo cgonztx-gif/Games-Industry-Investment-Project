@@ -579,3 +579,24 @@ def set_trade_order_status(client: Client, order_id: str, status: str) -> None:
     client.table("trade_orders").update({"status": status}).eq(
         "order_id", order_id
     ).execute()
+
+
+# ---------------------------------------------------------------------------
+# Returns Tracker helpers
+# ---------------------------------------------------------------------------
+
+def get_earliest_portfolio_snapshot(client: Client) -> Optional[dict]:
+    """Return the earliest portfolio_snapshots row (by date), or None if the table is empty."""
+    resp = (
+        client.table("portfolio_snapshots")
+        .select("*")
+        .order("date", desc=False)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def write_portfolio_snapshot(client: Client, snapshot: dict) -> None:
+    """Upsert one portfolio_snapshots row. Safe to call multiple times per date."""
+    client.table("portfolio_snapshots").upsert(snapshot, on_conflict="date").execute()

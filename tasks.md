@@ -53,12 +53,12 @@
 - [x] Apply `database/migrations/004_patch_events_source_url.sql` in Supabase SQL Editor
 - [x] Apply `database/migrations/005_equity_signals.sql` in Supabase SQL Editor
 - [x] Apply `database/migrations/006_patch_events_cadence_flags.sql` in Supabase SQL Editor (cadence status/baseline + monetization-without-content columns)
-- [ ] Apply `database/migrations/007_player_metrics_review_score_precision.sql` in Supabase SQL Editor (widens `review_score` to `numeric(5,2)` so a perfect 100.00 review score doesn't fail the upsert — added 2026-07-03 alongside the code fix in `steam_client.py`/`worker.py`; not confirmed applied yet)
+- [x] Apply `database/migrations/007_player_metrics_review_score_precision.sql` in Supabase SQL Editor (widens `review_score` to `numeric(5,2)` so a perfect 100.00 review score doesn't fail the upsert — added 2026-07-03 alongside the code fix in `steam_client.py`/`worker.py`; confirmed applied 2026-07-06 via `information_schema.columns` returning `(5, 2)`)
 
 ### RAWG backfill
 - [x] Build standalone RAWG backfill script — `scripts/rawg_backfill.py` (resumable, `--dry-run` / `--limit` / `--offset` / `--fix-steam` flags)
 - [x] Add bounded chunk mode for production-safe RAWG backfill runs: `python scripts/rawg_backfill.py --chunk-size 100`
-- [ ] Run RAWG backfill against production DB in chunks: `python scripts/rawg_backfill.py --chunk-size 100 --dry-run` then without `--dry-run`
+- [ ] Run RAWG backfill against production DB in chunks: `python scripts/rawg_backfill.py --chunk-size 100 --dry-run` then without `--dry-run` (checked 2026-07-06: 1,400/4,017 games still missing `rawg_slug`, 2,295/4,017 missing `steam_app_id`; partial progress recorded in `.rawg_backfill_state.json` — 350 entries — but not complete)
 
 ### Phase 2 skill
 - [x] Write `agents/skills/sentiment-analysis-methodology/SKILL.md` — encode VADER+LLM+ABSA hybrid framework
@@ -107,17 +107,17 @@
 
 ## Phase 5 — Portfolio Manager + Alpaca Execution
 
-- [ ] Create Alpaca paper trading account and generate API keys
-- [ ] Add `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` to `.env` and GitHub secrets
-- [ ] Configure Alpaca MCP server for Portfolio Manager tool calls
+- [x] Create Alpaca paper trading account and generate API keys — verified 2026-07-06 via `GET /v2/account` (status `ACTIVE`, $100K cash/portfolio value)
+- [x] Add `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_BASE_URL` to `.env` and GitHub secrets — present in `.env` and confirmed by user in GitHub secrets 2026-07-06
+- [x] Configure Alpaca MCP server for Portfolio Manager tool calls — migrated `manager.py` + `execution_agent.py` to the Claude Agent SDK with **custom in-process MCP servers** (`agents/portfolio/alpaca_mcp.py`), not the official alpacahq server (its bare `place_order` would bypass the approval guard). Portfolio Manager (Opus, `claude-opus-4-8`) is pinned via `allowed_tools` to one read-only tool `mcp__alpaca-readonly__get_account_state`; Execution Agent dispatches deterministically (no LLM) through the guarded `alpaca-execution-guarded` server whose `place_approved_order` tool re-runs the Supabase `status='approved'` guard. Added `claude-agent-sdk` to `requirements.txt`; tests: `tests/test_portfolio_manager.py` (updated) + `tests/test_execution_agent.py` (new), all passing with zero live calls.
 - [x] Build `agents/portfolio/manager.py` — reads weekly briefing + current Alpaca positions → produces trade plan → `trade_plans`
 - [x] Build minimal trade-plan approval UI or CLI flow before enabling execution
 - [x] Write `agents/skills/position-sizing-and-risk/SKILL.md` — max position size %, conviction-tier sizing, concentration limits, stop-loss / thesis-invalidation rules, benchmark-relative framing
 - [x] Build `agents/portfolio/execution_agent.py` — thin subagent, Alpaca tools only, reads approved `trade_orders` and places them
 - [x] Implement in-tool Alpaca pre-trade guard — `place_approved_order()` re-reads `status = 'approved'` in Supabase before placing orders
-- [ ] Implement Returns Tracker — fetch Alpaca portfolio state weekly, compute return vs. S&P 500, write to `portfolio_snapshots`
-- [ ] Wire portfolio manager + execution agent into `run_weekly.py`
-- [ ] Validate full pipeline end-to-end on paper trading account
+- [x] Implement Returns Tracker — fetch Alpaca portfolio state weekly, compute return vs. S&P 500, write to `portfolio_snapshots` — `agents/portfolio/returns_tracker.py`; tests: `tests/test_returns_tracker.py`, all passing with zero live calls
+- [x] Wire portfolio manager + execution agent into `run_weekly.py` — all three Phase 5 modules (Portfolio Manager → Execution Agent → Returns Tracker) wired between synthesis and the CrewAI placeholder, in that order, with `None`-guarded summary prints; plus the `weekly.yml` fix adding `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`/`ALPACA_BASE_URL` to the CI env block (2026-07-06)
+- [x] Validate full pipeline end-to-end on paper trading account — ran live 2026-07-06 against the 2026-07-06 weekly briefing: Portfolio Manager produced a real `pending` trade plan (0 orders, defensive posture — briefing had 0 confirmed opportunities, correctly declined to fabricate trades), reviewed via `scripts/review_trade_plans.py list`, Execution Agent ran cleanly against live Supabase/Alpaca (0 approved orders found, no errors), Returns Tracker wrote the real first `portfolio_snapshots` row ($100,000 value/cash, 0.0% return/benchmark as the inception baseline). Confirmed working end-to-end: MCP tool calls, the approval-status guard, and the DB writes. Not yet exercised live: the actual Alpaca order-placement call (`place_approved_order`), since no plan has proposed a real trade yet — will get its first live test the first week synthesis surfaces a confirmed, materiality-mapped opportunity.
 
 ---
 
@@ -159,7 +159,7 @@
 - [x] Add LangSmith tracing to all agent runs (token spend per subagent, full trace tree) — `agents/tracing.py` + `run_weekly.py` root span, per-worker `traced_step` spans, `wrap_anthropic` on the ABSA client for token usage
 - [ ] Add per-subagent token-spend logging via lifecycle hooks
 - [ ] Add graceful error recovery to workers (retry on transient API errors, degrade rather than crash)
-- [x] Lock model per-agent in all crew/agent configs — verify no agent defaults to most capable (audited 2026-07-03: `crew.py` workers on `claude-sonnet-4-6`, orchestrator on `claude-opus-4-8`, ABSA on `claude-haiku-4-5-20251001`, all explicit; synthesis/execution agents make no direct LLM calls. `agents/portfolio/manager.py` is now implemented and locked to `claude-opus-4-8` per the Opus-class tier.)
+- [x] Lock model per-agent in all crew/agent configs — verify no agent defaults to most capable (audited 2026-07-03: `crew.py` workers on `claude-sonnet-4-6`, orchestrator on `claude-opus-4-8`, ABSA on `claude-haiku-4-5-20251001`, all explicit; synthesis/execution agents make no direct LLM calls. `agents/portfolio/manager.py` is now implemented and locked to `claude-opus-4-8` per the Opus-class tier. Re-confirmed 2026-07-06 after the Agent SDK/MCP migration: `manager.py` runs an Agent SDK session still locked to `claude-opus-4-8`; `agents/portfolio/execution_agent.py` remains a deterministic dispatch loop with **no direct LLM calls** — it only invokes the guarded Alpaca MCP tool in-process, so the "execution agents make no direct LLM calls" claim still holds. If a reasoning step were ever added there, Sonnet-class `claude-sonnet-4-6` would be the correct tier.)
 - [ ] Add `YOUTUBE_API_KEY` to `.env` and GitHub Actions secrets once the YouTube Data API collector is enabled
 - [ ] Add `database/migrations/` pattern — write a migration for any future schema change rather than modifying `schema.sql` directly
 

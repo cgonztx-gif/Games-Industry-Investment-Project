@@ -17,6 +17,9 @@ from agents.workers.market_player import worker as market_worker
 from agents.workers.patch_notes import worker as patch_notes_worker
 from agents.workers.studio_intel import worker as studio_intel_worker
 from agents.workers.sentiment import worker as sentiment_worker
+from agents.portfolio import manager as portfolio_manager
+from agents.portfolio import execution_agent
+from agents.portfolio import returns_tracker
 
 if __name__ == "__main__":
     configure_tracing()
@@ -59,6 +62,43 @@ if __name__ == "__main__":
             f"Synthesis: {synthesis_result['divergence_count']} divergences | "
             f"{synthesis_result['risk_count']} risks"
         )
+
+        print("\n" + "=" * 60)
+        print("=== Portfolio Manager (Trade Plan) ===")
+        print("=" * 60)
+        plan_result = traced_step("portfolio_manager")(portfolio_manager.build_trade_plan)()
+        if plan_result:
+            print(
+                f"Trade plan for week_of {plan_result['week_of']}: "
+                f"{plan_result['order_count']} orders | "
+                f"{plan_result['watch_count']} watch items"
+            )
+            print("New orders are pending. Review with: python scripts/review_trade_plans.py list")
+        else:
+            print("No trade plan produced this week.")
+
+        print("\n" + "=" * 60)
+        print("=== Execution Agent (Approved Orders) ===")
+        print("=" * 60)
+        execution_result = traced_step("execution_agent")(execution_agent.run)()
+        print(
+            f"Execution: {execution_result['orders_checked']} checked | "
+            f"{execution_result['orders_placed']} placed | "
+            f"{execution_result['error_count']} errors"
+        )
+
+        print("\n" + "=" * 60)
+        print("=== Returns Tracker (Portfolio Snapshot) ===")
+        print("=" * 60)
+        returns_result = traced_step("returns_tracker")(returns_tracker.run)()
+        if returns_result:
+            print(
+                f"Snapshot: total_value=${returns_result['total_value']} | "
+                f"return={returns_result['total_return_pct']}% | "
+                f"benchmark={returns_result['benchmark_return_pct']}%"
+            )
+        else:
+            print("Snapshot skipped (account state unavailable).")
 
         print("\n" + "=" * 60)
         print("=== Weekly CrewAI Pipeline ===")
