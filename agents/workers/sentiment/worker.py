@@ -25,9 +25,10 @@ from agents.workers.sentiment.absa_client import run_absa
 from agents.workers.sentiment.divergence import compute_divergence
 from agents.workers.sentiment.reddit_cache import SupabaseRedditCache
 from agents.workers.sentiment.reddit_source import (
-    JsonRedditSource,
     RedditBlocked,
+    SubredditResolver,
     build_reddit_source,
+    build_subreddit_resolver,
     cached_resolve_subreddit,
 )
 from agents.workers.sentiment.steam_reviews_client import fetch_steam_reviews
@@ -74,14 +75,14 @@ def _write_source_snapshot(
     return True
 
 
-def _resolve_subreddit_for_game(db, game: dict, json_source: JsonRedditSource, lookup_cache) -> str | None:
+def _resolve_subreddit_for_game(db, game: dict, resolver: SubredditResolver, lookup_cache) -> str | None:
     stored_subreddit = game.get("subreddit")
     if stored_subreddit is not None:
         return stored_subreddit or None
 
     subreddit = cached_resolve_subreddit(
         game.get("title", ""),
-        json_source,
+        resolver,
         lookup_cache,
     )
     watchlist_id = game.get("watchlist_id")
@@ -118,12 +119,11 @@ def run() -> dict:
     today = date.today().isoformat()
     games = get_watchlist_games(db)
 
-    json_source = JsonRedditSource()
     lookup_cache = SupabaseRedditCache(client=db, source="subreddit_lookup")
-    post_cache = SupabaseRedditCache(client=db, source="reddit")
     steam_cache = SupabaseApiCache(client=db, source="steam_review_text")
     youtube_cache = SupabaseApiCache(client=db, source="youtube_comments")
-    reddit_source = build_reddit_source(post_cache)
+    subreddit_resolver = build_subreddit_resolver()
+    reddit_source = build_reddit_source(lambda source: SupabaseRedditCache(client=db, source=source))
 
     processed = []
     errors = []
@@ -164,7 +164,7 @@ def run() -> dict:
                 subreddit = _resolve_subreddit_for_game(
                     db,
                     game,
-                    json_source,
+                    subreddit_resolver,
                     lookup_cache,
                 )
                 if subreddit:

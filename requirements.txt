@@ -27,6 +27,11 @@ igdb-api-v4>=0.2.0
 # ============================================================
 vaderSentiment>=3.3.2  # VADER baseline sentiment scorer
 playwright>=1.40.0     # Low-volume studio careers fallback where hosted ATS APIs are unavailable
+# Reddit alternate-egress adapters (agents/workers/sentiment/reddit_source.py) use
+# only the already-pinned `requests` above -- no new dependency. The OAuth path
+# deliberately avoids `praw` (matches this repo's no-SDK convention, e.g.
+# alpaca_trading_client.py / email_delivery.py); the proxy path is HTTP/HTTPS only
+# (no `PySocks`/SOCKS5 support, and none needed).
 
 # ============================================================
 # Financial data (Phase 3)

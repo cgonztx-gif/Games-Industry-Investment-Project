@@ -266,48 +266,77 @@ class CachedRedditSource:
 the field names — keep them flat for exactly this reason. If a nested field is
 ever added, switch to a small `from_dict` classmethod.
 
-## 6. Fallback chain + factory
+## 6. Fallback chain + factory (as actually built, 2026-07-06)
 
 The "fallback" — given the official API is off the table — is an **alternate egress**,
-not a different API. Anything that can produce `RedditPost`/`RedditComment` objects
-(a residential-proxy `requests.Session`, or a managed scraping-API client) implements
-the same interface and slots in behind the free path.
+not a different API. This is no longer hypothetical: `agents/workers/sentiment/reddit_source.py`
+implements it as an env-var-gated `FirstAvailableRedditSource` chain with two real
+alternate-egress leaves, `ProxiedJsonRedditSource` and `OAuthRedditSource`, both of
+which reuse `JsonRedditSource`'s parsing logic via shared module-level functions
+(`_parse_post_listing`, `_walk_comments`, `_parse_comment_listing`, `_parse_subreddit_search`)
+rather than duplicating it.
 
 ```python
-class FirstAvailableRedditSource:
-    """Try each source in order; fall through to the next on RedditBlocked."""
-    def __init__(self, sources: list["RedditSource"]):
-        self.sources = sources
-
-    def fetch_posts(self, *a, **k):
-        last = None
-        for src in self.sources:
-            try:
-                return src.fetch_posts(*a, **k)
-            except RedditBlocked as e:
-                last = e
-        raise last or RedditBlocked("no source available")
-
-    def fetch_comments(self, *a, **k):
-        last = None
-        for src in self.sources:
-            try:
-                return src.fetch_comments(*a, **k)
-            except RedditBlocked as e:
-                last = e
-        raise last or RedditBlocked("no source available")
+class ProxiedJsonRedditSource(JsonRedditSource):
+    """Same as JsonRedditSource, routed through a standard HTTP/HTTPS proxy.
+    No SOCKS5 -- requests.Session supports http(s) proxies natively, zero new deps."""
+    def __init__(self, proxy_url: str, user_agent=_USER_AGENT, limiter=None,
+                 max_retries=3, session=None):
+        session = session or requests.Session()
+        session.proxies.update({"http": proxy_url, "https": proxy_url})
+        super().__init__(user_agent=user_agent, limiter=limiter,
+                          max_retries=max_retries, session=session)
 
 
-def build_reddit_source(cache: RedditCache) -> "RedditSource":
-    primary = CachedRedditSource(JsonRedditSource(), cache)
-    # MVP: free path only. Add a proxied/paid source here later — zero downstream change:
-    #   alt = CachedRedditSource(AltEgressRedditSource(session=proxied_session), cache)
-    #   return FirstAvailableRedditSource([primary, alt])
-    return primary
+class OAuthRedditSource:
+    """Reddit's OAuth2 refresh-token flow via plain `requests` -- no `praw`, matching
+    this repo's no-SDK convention (alpaca_trading_client.py, email_delivery.py).
+    Requires REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_REFRESH_TOKEN. Talks to
+    oauth.reddit.com (note: no .json suffix -- OAuth responses are JSON natively) with
+    a Bearer token cached in memory for its expires_in duration. Own RateLimiter(0.8, 0.2)
+    -- OAuth's rate ceiling (~100 req/min) is far looser than unauthenticated (~10/min)."""
+    # fetch_posts / fetch_comments / resolve_subreddit call the same module-level
+    # parsers as JsonRedditSource -- see reddit_source.py for the full implementation.
+
+
+def _build_leaf_sources() -> list["RedditSource"]:
+    """Priority: OAuth (all 3 vars required together) -> Proxy -> unauthenticated
+    JsonRedditSource (always last, unconditional -- the sole active path when no
+    new env vars are set)."""
+    leaves = []
+    if os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET") and os.environ.get("REDDIT_REFRESH_TOKEN"):
+        leaves.append(OAuthRedditSource(...))
+    if os.environ.get("REDDIT_PROXY_URL"):
+        leaves.append(ProxiedJsonRedditSource(...))
+    leaves.append(JsonRedditSource())
+    return leaves
+
+
+def build_reddit_source(cache_factory: "Callable[[str], RedditCache]") -> "RedditSource":
+    """Each leaf gets its own api_cache namespace (reddit_oauth / reddit_proxy / reddit)
+    so one path's stale-serve can never mask another path's real health. Returns a bare
+    CachedRedditSource when only JsonRedditSource is active -- the exact pre-existing
+    object graph, unchanged -- else a FirstAvailableRedditSource of per-leaf wraps."""
+    leaves = _build_leaf_sources()
+    wrapped = [CachedRedditSource(leaf, cache_factory(_CACHE_NAMESPACE_BY_TYPE[type(leaf)]))
+               for leaf in leaves]
+    return wrapped[0] if len(wrapped) == 1 else FirstAvailableRedditSource(wrapped)
+
+
+def build_subreddit_resolver() -> "SubredditResolver":
+    """Same priority chain, no cache wrap -- subreddit-name resolution results are
+    already cached separately by cached_resolve_subreddit()/lookup_cache in worker.py.
+    Fixes a real prior bug: worker.py used to instantiate a hardcoded JsonRedditSource()
+    for resolution, bypassing whatever fallback chain was configured."""
+    leaves = _build_leaf_sources()
+    return leaves[0] if len(leaves) == 1 else FirstAvailableRedditSource(leaves)
 ```
 
-An `AltEgressRedditSource` can often subclass `JsonRedditSource` and only override the
-`session` (e.g. one routed through a residential proxy) — the parsing logic is shared.
+All four new env vars (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN`,
+`REDDIT_PROXY_URL`) are optional and gate this behavior; with none set, `build_reddit_source`
+returns a bare `CachedRedditSource(JsonRedditSource(), cache)` — bit-for-bit identical to
+the object graph before this change. `resolve_subreddit` also now flows through
+`build_subreddit_resolver()` rather than a hardcoded, ungated `JsonRedditSource()`.
 
 ## 7. Integration with the Sentiment Subagent (CrewAI at MVP)
 
@@ -370,6 +399,16 @@ egress with a cleaner IP (a small always-on box, or a managed scraping API as th
 `AltEgressRedditSource`) — the rest of the pipeline stays on Actions. Treat a sustained
 `RedditBlocked` rate as a monitored health signal, not a silent failure.
 
+> **Confirmed, not hypothetical — 2026-07-06.** A live diagnostic run showed a static
+> WAF `403` ("You've been blocked by network security") on every endpoint tried
+> (`/r/*/top.json`, `/subreddits/search.json`), on every run, since inception — zero
+> successful Reddit rows have ever been written to `sentiment_snapshots`. This is the
+> IP-reputation block this section already anticipated, now confirmed sustained and
+> 100%-observed rather than intermittent throttling. Mitigation tier 3 (alternate
+> egress) is now implemented — see §6 above — as `ProxiedJsonRedditSource` and
+> `OAuthRedditSource`, both gated behind optional env vars and opt-in (not automatically
+> active until the user supplies real credentials/a real proxy).
+
 **Comment "more" nodes.** Deep/collapsed threads return `kind: "more"` placeholders
 that the code skips. For sentiment, top-level + first-level replies are almost always
 enough signal; only add the `morechildren` expansion if you find you're missing volume.
@@ -377,10 +416,20 @@ enough signal; only add the `morechildren` expansion if you find you're missing 
 **Deleted content.** `[deleted]`/`[removed]` bodies and authors appear normally; filter
 them before scoring so they don't drag the sentiment baseline.
 
-**Testing.** Record real `.json` responses to fixtures once, then replay them in unit
-tests (`responses` or a stubbed session). CI then never touches Reddit, tests are
-deterministic, and you can assert parsing against known payloads including edge cases
-(deleted comments, empty subs, a 429).
+**Testing.** `tests/test_reddit_source.py` now exists — hand-built fixture dicts plus a
+local fake `requests.Session` (records calls, pops pre-scripted responses/exceptions in
+order), not recorded cassettes as originally sketched here. Covers `JsonRedditSource`
+(200/403/451/429-backoff/retries-exhausted/nested comments/malformed responses/subreddit
+match threshold), `CachedRedditSource` (fresh hit, miss, blocked+stale, blocked+empty),
+`FirstAvailableRedditSource`, `ProxiedJsonRedditSource`, `OAuthRedditSource` (token
+lifecycle, 401/403/429 handling, no-`.json`-suffix + Bearer header), and the
+`build_reddit_source`/`build_subreddit_resolver`/`_build_leaf_sources` factory —
+including the load-bearing proof that with all four new env vars unset, the returned
+object graph is unchanged. Zero live network calls anywhere in the suite. Note: OAuth
+registration itself is a separate, manual, non-guaranteed Reddit approval process (no
+SLA as of the Nov 2025 policy) — the adapter code is *ready* to use OAuth the moment
+credentials exist, but is not *activated*, and this test suite cannot and does not
+verify a real token exchange or a real proxied request reaching Reddit.
 
 **Honest caveat.** The `.json` route is unofficial, and Reddit's Data API terms govern
 automated access regardless of endpoint; their wiki is explicit that non-OAuth traffic

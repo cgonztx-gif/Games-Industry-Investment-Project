@@ -1,27 +1,48 @@
 """
-Unauthenticated Reddit adapter.
+Reddit adapter with env-var-gated alternate egress.
 
-Hits public read-only .json endpoints — no OAuth credentials required.
-Rate-limited to ~6-7 req/min to stay under Reddit's ~10/min unauthenticated ceiling.
-Caching and graceful degradation are handled by CachedRedditSource + RedditCache.
+Default (zero new env vars set): unauthenticated public .json endpoints, exactly as
+before — rate-limited to ~6-7 req/min to stay under Reddit's ~10/min unauthenticated
+ceiling. Confirmed 2026-07-06: this path is now hit with a static 403 WAF block from
+GitHub Actions' datacenter IPs on every endpoint, every run (an IP-reputation block,
+not throttling). Two optional, opt-in alternate-egress paths exist and are tried
+first when configured:
 
-Architecture:
+    1. OAuth (REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET + REDDIT_REFRESH_TOKEN, all
+       three required together) -- OAuthRedditSource, plain `requests`, no `praw`.
+    2. Standard HTTP/HTTPS proxy (REDDIT_PROXY_URL) -- ProxiedJsonRedditSource, a
+       thin JsonRedditSource subclass that only swaps the session's proxies.
+
+Caching and graceful degradation are handled by CachedRedditSource + RedditCache,
+one per-leaf cache namespace ("reddit" / "reddit_proxy" / "reddit_oauth") so a
+working path's stale-serve can never mask another path's real health.
+
+Architecture (default, no new env vars set -- identical object graph as before):
     worker.py
-        └── CachedRedditSource(JsonRedditSource(), post_cache)
+        └── build_reddit_source(cache_factory) -> CachedRedditSource(JsonRedditSource(), cache)
                 └── on RedditBlocked: serve stale cache, or re-raise if cache empty
-        └── cached_resolve_subreddit(title, JsonRedditSource(), lookup_cache)
-                └── caches (source, key) → [subreddit_name] for 30 days
+        └── build_subreddit_resolver() -> JsonRedditSource() (uncached; results are
+                cached separately by cached_resolve_subreddit()/lookup_cache in worker.py)
+
+Architecture (any of the 4 env vars set):
+    build_reddit_source(cache_factory) -> FirstAvailableRedditSource([
+        CachedRedditSource(OAuthRedditSource, cache_factory("reddit_oauth")),   # if configured
+        CachedRedditSource(ProxiedJsonRedditSource, cache_factory("reddit_proxy")),  # if configured
+        CachedRedditSource(JsonRedditSource(), cache_factory("reddit")),        # always last
+    ])
+    build_subreddit_resolver() -> same priority order, uncached leaves
 """
 
 from __future__ import annotations
 
 import difflib
 import logging
+import os
 import random
 import re
 import time
 from dataclasses import asdict, dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 import requests
 
@@ -31,6 +52,8 @@ logger = logging.getLogger("reddit_source")
 
 _USER_AGENT = "github-actions:games-intel-platform:v0.1 (by /u/cgonztx)"
 _BASE = "https://www.reddit.com"
+_OAUTH_BASE = "https://oauth.reddit.com"
+_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +110,10 @@ class RedditSource(Protocol):
     ) -> list[RedditComment]: ...
 
 
+class SubredditResolver(Protocol):
+    def resolve_subreddit(self, game_title: str) -> str | None: ...
+
+
 # ---------------------------------------------------------------------------
 # Rate limiter
 # ---------------------------------------------------------------------------
@@ -120,6 +147,78 @@ def _normalize(title: str) -> str:
         if title.startswith(article):
             title = title[len(article):]
     return title
+
+
+# ---------------------------------------------------------------------------
+# Shared response parsers (module-level so JsonRedditSource, ProxiedJsonRedditSource,
+# and OAuthRedditSource all reuse the exact same parsing logic without duplication)
+# ---------------------------------------------------------------------------
+
+def _parse_post_listing(data: dict, subreddit: str) -> list[RedditPost]:
+    out: list[RedditPost] = []
+    for child in data.get("data", {}).get("children", []):
+        d = child.get("data", {})
+        if d.get("stickied"):
+            continue
+        out.append(RedditPost(
+            id=d.get("id", ""),
+            subreddit=subreddit,
+            title=d.get("title", ""),
+            selftext=d.get("selftext", ""),
+            author=d.get("author", "[deleted]"),
+            score=d.get("score", 0),
+            num_comments=d.get("num_comments", 0),
+            created_utc=d.get("created_utc", 0.0),
+            permalink=d.get("permalink", ""),
+            url=d.get("url", ""),
+        ))
+    return out
+
+
+def _walk_comments(children: list, post_id: str, out: list[RedditComment]) -> None:
+    for c in children:
+        if c.get("kind") != "t1":
+            continue
+        d = c.get("data", {})
+        out.append(RedditComment(
+            id=d.get("id", ""),
+            post_id=post_id,
+            body=d.get("body", ""),
+            author=d.get("author", "[deleted]"),
+            score=d.get("score", 0),
+            created_utc=d.get("created_utc", 0.0),
+        ))
+        replies = d.get("replies")
+        if isinstance(replies, dict):
+            _walk_comments(
+                replies.get("data", {}).get("children", []),
+                post_id,
+                out,
+            )
+
+
+def _parse_comment_listing(data, post_id: str) -> list[RedditComment]:
+    if not isinstance(data, list) or len(data) < 2:
+        return []
+    out: list[RedditComment] = []
+    _walk_comments(data[1].get("data", {}).get("children", []), post_id, out)
+    return out
+
+
+def _parse_subreddit_search(data: dict, game_title: str) -> str | None:
+    normalized = _normalize(game_title)
+    best_name: str | None = None
+    best_ratio = 0.0
+
+    for child in data.get("data", {}).get("children", []):
+        d = child.get("data", {})
+        candidate = _normalize(d.get("display_name", ""))
+        ratio = difflib.SequenceMatcher(None, normalized, candidate).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_name = d.get("display_name")
+
+    return best_name if best_ratio >= 0.70 else None
 
 
 # ---------------------------------------------------------------------------
@@ -172,24 +271,7 @@ class JsonRedditSource:
             f"/r/{subreddit}/{sort}.json",
             params={"t": timeframe, "limit": min(limit, 100)},
         )
-        out: list[RedditPost] = []
-        for child in data.get("data", {}).get("children", []):
-            d = child.get("data", {})
-            if d.get("stickied"):
-                continue
-            out.append(RedditPost(
-                id=d.get("id", ""),
-                subreddit=subreddit,
-                title=d.get("title", ""),
-                selftext=d.get("selftext", ""),
-                author=d.get("author", "[deleted]"),
-                score=d.get("score", 0),
-                num_comments=d.get("num_comments", 0),
-                created_utc=d.get("created_utc", 0.0),
-                permalink=d.get("permalink", ""),
-                url=d.get("url", ""),
-            ))
-        return out
+        return _parse_post_listing(data, subreddit)
 
     def fetch_comments(
         self,
@@ -201,37 +283,7 @@ class JsonRedditSource:
             f"/r/{subreddit}/comments/{post_id}.json",
             params={"limit": limit},
         )
-        if not isinstance(data, list) or len(data) < 2:
-            return []
-        out: list[RedditComment] = []
-        self._walk(data[1].get("data", {}).get("children", []), post_id, out)
-        return out
-
-    def _walk(
-        self,
-        children: list,
-        post_id: str,
-        out: list[RedditComment],
-    ) -> None:
-        for c in children:
-            if c.get("kind") != "t1":
-                continue
-            d = c.get("data", {})
-            out.append(RedditComment(
-                id=d.get("id", ""),
-                post_id=post_id,
-                body=d.get("body", ""),
-                author=d.get("author", "[deleted]"),
-                score=d.get("score", 0),
-                created_utc=d.get("created_utc", 0.0),
-            ))
-            replies = d.get("replies")
-            if isinstance(replies, dict):
-                self._walk(
-                    replies.get("data", {}).get("children", []),
-                    post_id,
-                    out,
-                )
+        return _parse_comment_listing(data, post_id)
 
     def resolve_subreddit(self, game_title: str) -> str | None:
         """
@@ -244,20 +296,143 @@ class JsonRedditSource:
             "/subreddits/search.json",
             params={"q": game_title, "limit": 5},
         )
+        return _parse_subreddit_search(data, game_title)
 
-        normalized = _normalize(game_title)
-        best_name: str | None = None
-        best_ratio = 0.0
 
-        for child in data.get("data", {}).get("children", []):
-            d = child.get("data", {})
-            candidate = _normalize(d.get("display_name", ""))
-            ratio = difflib.SequenceMatcher(None, normalized, candidate).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_name = d.get("display_name")
+# ---------------------------------------------------------------------------
+# Alternate egress #1: same unauthenticated .json path, routed through a proxy
+# ---------------------------------------------------------------------------
 
-        return best_name if best_ratio >= 0.70 else None
+class ProxiedJsonRedditSource(JsonRedditSource):
+    """Same as JsonRedditSource, routed through a standard HTTP/HTTPS proxy.
+    No SOCKS5 -- requests.Session supports http(s) proxies natively, zero new deps."""
+
+    def __init__(
+        self,
+        proxy_url: str,
+        user_agent: str = _USER_AGENT,
+        limiter: RateLimiter | None = None,
+        max_retries: int = 3,
+        session: requests.Session | None = None,
+    ) -> None:
+        session = session or requests.Session()
+        session.proxies.update({"http": proxy_url, "https": proxy_url})
+        super().__init__(
+            user_agent=user_agent,
+            limiter=limiter,
+            max_retries=max_retries,
+            session=session,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Alternate egress #2: Reddit's OAuth2 refresh-token flow via plain requests
+# ---------------------------------------------------------------------------
+
+class OAuthRedditSource:
+    """Reddit's OAuth2 refresh-token flow via plain `requests` -- no `praw`,
+    matching alpaca_trading_client.py / email_delivery.py's no-SDK convention.
+    Requires REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET / REDDIT_REFRESH_TOKEN.
+    Caches the access token in memory for its expires_in duration (minus a 60s
+    safety margin), not fetched per request."""
+
+    def __init__(
+        self,
+        client_id,
+        client_secret,
+        refresh_token,
+        user_agent=_USER_AGENT,
+        limiter=None,
+        max_retries=3,
+        session=None,
+    ):
+        self.client_id, self.client_secret, self.refresh_token = client_id, client_secret, refresh_token
+        self.user_agent = user_agent
+        self.limiter = limiter or RateLimiter(min_interval=0.8, jitter=0.2)
+        self.max_retries = max_retries
+        self.session = session or requests.Session()
+        self.session.headers.update({"User-Agent": user_agent})
+        self._access_token: str | None = None
+        self._token_expires_at: float = 0.0
+
+    def _ensure_token(self) -> str:
+        if self._access_token is not None and time.monotonic() < self._token_expires_at:
+            return self._access_token
+        try:
+            resp = self.session.post(
+                _TOKEN_URL,
+                auth=(self.client_id, self.client_secret),
+                data={"grant_type": "refresh_token", "refresh_token": self.refresh_token},
+                headers={"User-Agent": self.user_agent},
+                timeout=15,
+            )
+        except requests.exceptions.RequestException as exc:
+            logger.warning("oauth token fetch failed: %s", exc)
+            raise RedditBlocked(f"oauth token fetch error: {exc}") from exc
+        if resp.status_code != 200:
+            logger.warning("oauth token fetch non-200: %s", resp.status_code)
+            raise RedditBlocked(f"oauth token fetch returned {resp.status_code}")
+        payload = resp.json()
+        token = payload.get("access_token")
+        if not token:
+            raise RedditBlocked("oauth token response missing access_token")
+        self._access_token = token
+        self._token_expires_at = time.monotonic() + max(payload.get("expires_in", 3600) - 60, 30)
+        return token
+
+    def _get(self, path: str, params: dict | None = None) -> dict:
+        url = f"{_OAUTH_BASE}{path}"
+        for attempt in range(1, self.max_retries + 1):
+            token = self._ensure_token()
+            self.limiter.wait()
+            resp = self.session.get(
+                url,
+                params=params,
+                timeout=15,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            if resp.status_code == 401:
+                logger.warning(
+                    "oauth 401 on %s; forcing token refresh (attempt %d/%d)",
+                    url, attempt, self.max_retries,
+                )
+                self._access_token, self._token_expires_at = None, 0.0
+                continue
+            if resp.status_code in (429, 503):
+                backoff = float(resp.headers.get("Retry-After", 2 ** attempt))
+                logger.warning(
+                    "oauth throttled %s; backoff %.0fs (attempt %d/%d)",
+                    resp.status_code, backoff, attempt, self.max_retries,
+                )
+                time.sleep(backoff)
+                continue
+            if resp.status_code in (403, 451):
+                logger.warning("oauth blocked: %s on %s", resp.status_code, url)
+                raise RedditBlocked(f"{resp.status_code} on {url}")
+            resp.raise_for_status()
+        logger.warning("oauth retries exhausted for %s", url)
+        raise RedditBlocked(f"retries exhausted for {url}")
+
+    def fetch_posts(self, subreddit, sort="top", timeframe="week", limit=100):
+        data = self._get(
+            f"/r/{subreddit}/{sort}",
+            params={"t": timeframe, "limit": min(limit, 100)},
+        )
+        return _parse_post_listing(data, subreddit)
+
+    def fetch_comments(self, post_id, subreddit, limit=200):
+        return _parse_comment_listing(
+            self._get(f"/r/{subreddit}/comments/{post_id}", params={"limit": limit}),
+            post_id,
+        )
+
+    def resolve_subreddit(self, game_title):
+        return _parse_subreddit_search(
+            self._get("/subreddits/search", params={"q": game_title, "limit": 5}),
+            game_title,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -355,17 +530,66 @@ class FirstAvailableRedditSource:
                 last = e
         raise last or RedditBlocked("no source available")
 
+    def resolve_subreddit(self, game_title: str) -> str | None:
+        last: RedditBlocked | None = None
+        for src in self.sources:
+            try:
+                return src.resolve_subreddit(game_title)
+            except RedditBlocked as e:
+                last = e
+        raise last or RedditBlocked("no source available")
+
 
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
-def build_reddit_source(cache: RedditCache) -> CachedRedditSource:
-    primary = CachedRedditSource(JsonRedditSource(), cache)
-    # To add a proxied fallback later — zero downstream change:
-    #   alt = CachedRedditSource(JsonRedditSource(session=proxied_session), alt_cache)
-    #   return FirstAvailableRedditSource([primary, alt])
-    return primary
+def _build_leaf_sources() -> list[RedditSource]:
+    """Priority: OAuth (all 3 vars required together, partial = treated as absent)
+    -> Proxy -> unauthenticated JsonRedditSource (always last, unconditional --
+    the sole active path when no new env vars are set)."""
+    leaves: list[RedditSource] = []
+    client_id = os.environ.get("REDDIT_CLIENT_ID")
+    client_secret = os.environ.get("REDDIT_CLIENT_SECRET")
+    refresh_token = os.environ.get("REDDIT_REFRESH_TOKEN")
+    if client_id and client_secret and refresh_token:
+        leaves.append(OAuthRedditSource(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+        ))
+    proxy_url = os.environ.get("REDDIT_PROXY_URL")
+    if proxy_url:
+        leaves.append(ProxiedJsonRedditSource(proxy_url=proxy_url))
+    leaves.append(JsonRedditSource())
+    return leaves
+
+
+_CACHE_NAMESPACE_BY_TYPE = {
+    JsonRedditSource: "reddit",
+    ProxiedJsonRedditSource: "reddit_proxy",
+    OAuthRedditSource: "reddit_oauth",
+}
+
+
+def build_reddit_source(cache_factory: Callable[[str], RedditCache]) -> RedditSource:
+    """cache_factory: Callable[[str], RedditCache]. Returns a single CachedRedditSource
+    when only JsonRedditSource is active (default -- identical object graph to before
+    this change), else a FirstAvailableRedditSource of per-leaf CachedRedditSource wraps,
+    each with its own cache namespace."""
+    leaves = _build_leaf_sources()
+    wrapped = [
+        CachedRedditSource(leaf, cache_factory(_CACHE_NAMESPACE_BY_TYPE[type(leaf)]))
+        for leaf in leaves
+    ]
+    return wrapped[0] if len(wrapped) == 1 else FirstAvailableRedditSource(wrapped)
+
+
+def build_subreddit_resolver() -> SubredditResolver:
+    """Uncached resolver chain mirroring build_reddit_source's env-var priority --
+    resolution results are already cached separately by cached_resolve_subreddit()."""
+    leaves = _build_leaf_sources()
+    return leaves[0] if len(leaves) == 1 else FirstAvailableRedditSource(leaves)
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +601,7 @@ _LOOKUP_TTL_HOURS = 24 * 30
 
 def cached_resolve_subreddit(
     game_title: str,
-    json_source: JsonRedditSource,
+    resolver: SubredditResolver,
     lookup_cache: RedditCache,
 ) -> str | None:
     """
@@ -395,6 +619,6 @@ def cached_resolve_subreddit(
     if cached is not None:
         return cached[0] if cached else None
 
-    result = json_source.resolve_subreddit(game_title)
+    result = resolver.resolve_subreddit(game_title)
     lookup_cache.set(key, [result] if result else [])
     return result

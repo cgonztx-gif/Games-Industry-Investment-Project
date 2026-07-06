@@ -214,3 +214,34 @@
 - [x] Implement the Alpaca order pre-trade guard inside the order-placement tool itself; lifecycle hooks can mirror it later but must not be the only guard.
 - [x] Add the midweek Supabase keepalive GitHub Actions job required by the docs to avoid free-tier project pauses.
 - [x] Add a scheduled `api_cache` pruning step or Supabase `pg_cron` job for the 14-day cache retention policy.
+
+---
+
+## Reddit Alternate-Egress Remediation — 2026-07-06
+
+- [x] Confirm live diagnosis: Reddit's unauthenticated `.json` path returns a static `403` WAF block ("You've been blocked by network security") from GitHub Actions' datacenter IPs, on every endpoint tried, 100% of runs since inception — an IP-reputation block, not rate-limiting.
+- [x] Add `ProxiedJsonRedditSource` and `OAuthRedditSource` to `reddit_source.py`, gated behind `REDDIT_PROXY_URL` and `REDDIT_CLIENT_ID`+`REDDIT_CLIENT_SECRET`+`REDDIT_REFRESH_TOKEN` respectively; extract shared listing/comment/search parsers so both reuse `JsonRedditSource`'s parsing logic.
+- [x] Rewrite `build_reddit_source()` as an env-var-driven `FirstAvailableRedditSource` chain (OAuth → Proxy → unauthenticated, each with its own `api_cache` namespace); add `build_subreddit_resolver()` and use it in `worker.py`'s `_resolve_subreddit_for_game()` instead of a hardcoded `JsonRedditSource()`.
+- [x] Add `tests/test_reddit_source.py` — first-ever test coverage for `reddit_source.py`/`reddit_cache.py`/`worker.py`'s Reddit paths, all mocked, zero live network calls (36 tests, all passing; full suite 124/124 passing).
+- [x] Update `.env.example`, `CLAUDE.md`, `docs/reddit_source_adapter.md`, `docs/data-source-risk-register.md` to document the new optional vars and the confirmed-permanent-block framing (previously described as partial/intermittent).
+### User follow-up — activating a real egress path (cannot be self-certified without credentials)
+
+Pick **one** path (or both — OAuth is tried first if both are configured). Proxy is faster to get working; OAuth is free but has an uncertain approval timeline.
+
+**Option A — Proxy (faster to activate):**
+- [ ] Sign up for a proxy service that offers a residential or "clean"/non-datacenter IP pool (a plain datacenter proxy will likely get the same WAF block GitHub Actions already gets — the whole point is a cleaner IP reputation). Get an HTTP/HTTPS proxy URL in the form `http://user:pass@host:port`.
+- [ ] Set `REDDIT_PROXY_URL` to that value in `.env` (local testing) and as a GitHub Actions repo secret (Settings → Secrets and variables → Actions → New repository secret).
+- [ ] Add `REDDIT_PROXY_URL: ${{ secrets.REDDIT_PROXY_URL }}` to `.github/workflows/weekly.yml`'s `env:` block (not yet done — this wiring step still needs to happen once you have a value to wire in).
+
+**Option B — Reddit OAuth (free, but gated behind manual approval):**
+- [ ] Go to https://www.reddit.com/prefs/apps → create an app. As of the Nov 2025 "Responsible Builder Policy," new app creation goes through a manual review queue, not instant self-serve — there's no published SLA, so expect a wait with no guaranteed outcome.
+- [ ] Once approved, choose "script" type to get a `client_id` (shown under the app name) and `client_secret`.
+- [ ] Obtain a **refresh token** (not a short-lived access token) via Reddit's OAuth2 `authorization_code` flow with `duration=permanent` — this is a one-time manual step (visit an authorize URL, approve access, exchange the returned code for tokens using your client_id/secret). `OAuthRedditSource` expects to reuse this refresh token indefinitely, not re-run this flow on every deploy.
+- [ ] Set `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN` in `.env` and as GitHub Actions repo secrets.
+- [ ] Add all three to `.github/workflows/weekly.yml`'s `env:` block (not yet done).
+
+**Either way, once configured:**
+- [ ] Run the sentiment worker locally first as a cheap smoke test: `python -c "import sys; sys.path.insert(0, '.'); from dotenv import load_dotenv; load_dotenv(); from agents.workers.sentiment import worker; import json; print(json.dumps(worker.run(), indent=2))"` and confirm `reddit_blocked_count` is `0` (or much lower than the game count) instead of matching the total.
+- [ ] Confirm in Supabase: `select count(*) from sentiment_snapshots where source = 'reddit' and date = current_date;` returns > 0 — the first time this has ever been true.
+- [ ] Trigger the real GitHub Actions workflow (`workflow_dispatch` or wait for the Monday cron) and re-check the same query plus the run's log for the `[sentiment] Reddit blocked ...` line (should be absent or much reduced).
+- [ ] Once confirmed working, check this whole subsection off and update the `CLAUDE.md`/risk-register notes that currently say the unauthenticated path is 100%-blocked, since that framing will be stale.
