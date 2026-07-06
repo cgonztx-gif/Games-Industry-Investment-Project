@@ -155,8 +155,10 @@ class JsonRedditSource:
                 time.sleep(backoff)
                 continue
             if resp.status_code in (403, 451):
+                logger.warning("blocked: %s on %s", resp.status_code, url)
                 raise RedditBlocked(f"{resp.status_code} on {url}")
             resp.raise_for_status()
+        logger.warning("retries exhausted for %s", url)
         raise RedditBlocked(f"retries exhausted for {url}")
 
     def fetch_posts(

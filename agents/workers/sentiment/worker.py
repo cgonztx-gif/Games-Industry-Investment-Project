@@ -128,6 +128,8 @@ def run() -> dict:
     processed = []
     errors = []
     skipped_no_data = 0
+    reddit_blocked_count = 0
+    first_reddit_block_reason: str | None = None
 
     for i, game in enumerate(games):
         if i % 10 == 0:
@@ -180,8 +182,11 @@ def run() -> dict:
                         texts_with_weights=reddit_texts,
                         player_metrics=player_metrics,
                     ) or wrote_any
-            except RedditBlocked:
-                pass
+            except RedditBlocked as exc:
+                reddit_blocked_count += 1
+                if first_reddit_block_reason is None:
+                    first_reddit_block_reason = str(exc)
+                    print(f"[sentiment] Reddit blocked (first occurrence): {exc}")
 
             youtube_comments = fetch_youtube_comments(title, cache=youtube_cache)
             wrote_any = _write_source_snapshot(
@@ -202,6 +207,13 @@ def run() -> dict:
         except Exception as exc:
             errors.append({"title": title, "error": str(exc)})
 
+    if reddit_blocked_count:
+        print(
+            f"[sentiment] Reddit blocked for {reddit_blocked_count}/{len(games)} games "
+            f"this run (reason: {first_reddit_block_reason}); Reddit sentiment coverage "
+            "degraded for this run — other sources (Steam, YouTube) are unaffected."
+        )
+
     print(
         f"[sentiment] Done - {len(processed)} games written, "
         f"{skipped_no_data} skipped (no data), {len(errors)} errors."
@@ -212,4 +224,5 @@ def run() -> dict:
         "skipped_no_data": skipped_no_data,
         "error_count": len(errors),
         "errors": errors,
+        "reddit_blocked_count": reddit_blocked_count,
     }

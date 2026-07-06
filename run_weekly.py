@@ -52,7 +52,11 @@ if __name__ == "__main__":
         print("=== Sentiment Analysis (Reddit + Steam) ===")
         print("=" * 60)
         sentiment_result = traced_step("sentiment_worker")(sentiment_worker.run)()
-        print(f"Sentiment: {sentiment_result['games_processed']} games written | {sentiment_result['error_count']} errors")
+        print(
+            f"Sentiment: {sentiment_result['games_processed']} games written | "
+            f"{sentiment_result['error_count']} errors | "
+            f"reddit_blocked={sentiment_result['reddit_blocked_count']}"
+        )
 
         print("\n" + "=" * 60)
         print("=== Synthesis & Weekly Briefing ===")
