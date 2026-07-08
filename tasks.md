@@ -245,3 +245,15 @@ Pick **one** path (or both — OAuth is tried first if both are configured). Pro
 - [ ] Confirm in Supabase: `select count(*) from sentiment_snapshots where source = 'reddit' and date = current_date;` returns > 0 — the first time this has ever been true.
 - [ ] Trigger the real GitHub Actions workflow (`workflow_dispatch` or wait for the Monday cron) and re-check the same query plus the run's log for the `[sentiment] Reddit blocked ...` line (should be absent or much reduced).
 - [ ] Once confirmed working, check this whole subsection off and update the `CLAUDE.md`/risk-register notes that currently say the unauthenticated path is 100%-blocked, since that framing will be stale.
+
+---
+
+## Supabase Data-Gap Audit — 2026-07-06
+
+Full-table null/coverage audit against the live Supabase project. Row counts at time of audit: `games` 4,017, `watchlist` 4,017 (all active), `player_metrics` 1,323, `sentiment_snapshots` 971, `patch_events` 794, `portfolio_positions_context` 15, `positions` 0, `trade_orders` 0, `watchlist_proposals` 0.
+
+- [ ] Populate `player_metrics.peak_players_24h` — NULL on all 1,323 existing rows; `agents/workers/market_player/worker.py` hardcodes it to `None` at write time (no Steam endpoint currently queried supplies a true 24h peak). Either source it (Steam's `appdetails`/SteamSpy-style peak field, or compute a rolling 24h max from repeated CCU polls) or drop the column if it's not going to be filled.
+- [ ] Populate `portfolio_positions_context.signal_score` — NULL on all 15 existing rows; composite health score column has no writer anywhere in `financial_overlay`/`db_client.py`. Decide the composite formula (per `agents/skills/equity-signal-mapping/SKILL.md`) and wire it into `agents/workers/financial_overlay/worker.py`, or drop the column.
+- [ ] Investigate the `positions` table — 0 rows since inception, no readers or writers in `agents/portfolio/` despite the schema supporting per-position qty/entry price/unrealized P&L/holding period. Either wire the Returns Tracker (or a new step) to populate it from Alpaca's live positions, or remove it from `schema.sql` if per-position tracking is being deferred to Phase 7's dashboard reading Alpaca directly.
+- [ ] Close the watchlist coverage gap: 3,504/4,017 (87%) active watchlist games have never received a `player_metrics` row, and 3,498/4,017 (87%) never received a `sentiment_snapshots` row — this is mostly downstream of the `games.steam_app_id` gap (2,028/4,017 NULL, tracked under the RAWG backfill task above) and the `watchlist.subreddit` backlog (3,017/4,017 unresolved, tracked under the Reddit remediation section above). No new work item beyond finishing those two backfills, but worth re-running this coverage check after both land to confirm the gap actually closes rather than just shifting.
+- [ ] Minor/likely-benign nulls to spot-check rather than fix outright: `player_metrics.review_score`/`review_count` NULL on 42/1,323 rows and `review_velocity` NULL on 78/1,323 (games with zero Steam reviews — confirm this is the actual cause, not a silent Steam API failure being swallowed).
