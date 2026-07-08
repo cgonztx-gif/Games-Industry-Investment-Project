@@ -167,6 +167,7 @@ pip install -r requirements.txt
 # database/migrations/006_patch_events_cadence_flags.sql
 # database/migrations/007_player_metrics_review_score_precision.sql
 # database/migrations/008_news_items.sql
+# database/migrations/009_seed_ambiguous_titles.sql
 
 # Run the watchlist seeding agent (one-time, idempotent)
 python agents/orchestrator/seed_watchlist.py

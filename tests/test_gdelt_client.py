@@ -46,7 +46,10 @@ class _FakeSession:
 
     def get(self, *args, **kwargs):
         self.calls.append((args, kwargs))
-        return self.responses.pop(0)
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 def _fast_limiter():
@@ -97,6 +100,34 @@ def test_search_raises_gdelt_blocked_after_retries_exhausted():
         _FakeResponse(500),
         _FakeResponse(500),
         _FakeResponse(500),
+    ])
+    source = GdeltSource(limiter=_fast_limiter(), session=session, max_retries=3)
+
+    try:
+        source.search("query")
+        assert False, "expected GdeltBlocked"
+    except GdeltBlocked:
+        pass
+
+
+def test_search_retries_on_connection_error_then_succeeds():
+    session = _FakeSession([
+        requests.exceptions.ConnectionError("Remote end closed connection without response"),
+        _articles_response([]),
+    ])
+    source = GdeltSource(limiter=_fast_limiter(), session=session, max_retries=3)
+
+    articles = source.search("query")
+
+    assert articles == []
+    assert len(session.calls) == 2
+
+
+def test_search_raises_gdelt_blocked_after_connection_errors_exhausted():
+    session = _FakeSession([
+        requests.exceptions.ConnectionError("boom"),
+        requests.exceptions.ConnectionError("boom"),
+        requests.exceptions.ConnectionError("boom"),
     ])
     source = GdeltSource(limiter=_fast_limiter(), session=session, max_retries=3)
 

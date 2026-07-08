@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 from typing import Optional
@@ -374,11 +375,18 @@ def write_news_item(client: Client, item: dict) -> None:
 
 
 def get_recent_news_items(client: Client, game_id: str, since: str) -> list[dict]:
-    """Return news_items rows matched to game_id, published on/after `since`."""
+    """Return news_items rows matched to game_id, published on/after `since`.
+
+    matched_entities is a jsonb array column. postgrest-py's .contains() only
+    JSON-encodes dict values -- any other iterable (including our list of one
+    id) gets rendered as a Postgres array literal (`{game_id}`), which is
+    invalid syntax for a jsonb column. Building the `cs` filter manually with
+    json.dumps keeps the value as a real JSON array (`["game_id"]`).
+    """
     resp = (
         client.table("news_items")
         .select("*")
-        .contains("matched_entities", [game_id])
+        .filter("matched_entities", "cs", json.dumps([game_id]))
         .gte("published_at", since)
         .execute()
     )

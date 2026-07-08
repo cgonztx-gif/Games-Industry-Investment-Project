@@ -115,7 +115,13 @@ class GdeltSource:
         }
         for attempt in range(1, self.max_retries + 1):
             self.limiter.wait()
-            resp = self.session.get(_DOC_URL, params=params, timeout=15)
+            try:
+                resp = self.session.get(_DOC_URL, params=params, timeout=15)
+            except requests.exceptions.RequestException as exc:
+                logger.warning(
+                    "gdelt request error: %s (attempt %d/%d)", exc, attempt, self.max_retries,
+                )
+                continue
             if resp.status_code == 429:
                 backoff = float(resp.headers.get("Retry-After", 2 ** attempt))
                 logger.warning(

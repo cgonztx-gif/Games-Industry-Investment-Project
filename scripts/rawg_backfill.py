@@ -8,6 +8,13 @@ For every game in the DB where rawg_slug IS NULL, this script:
 
 The script is fully resumable: re-running it only touches rows still missing rawg_slug.
 
+In chunk mode, a game already attempted is normally skipped forever (state file
+records it as "matched"/"no_match"/"error"). Since RAWG's catalog grows over
+time, a "no_match" verdict can go stale: a title with no match today may exist
+next month. --retry-stale-days N (default 30, 0 disables) makes "no_match" rows
+older than N days eligible for re-attempt again, the same way --retry-errors
+already works for "error" rows. "matched" rows are never retried automatically.
+
 Usage:
     python scripts/rawg_backfill.py                   # full run (rawg_slug IS NULL)
     python scripts/rawg_backfill.py --dry-run         # print plan, no DB writes
@@ -16,6 +23,8 @@ Usage:
     python scripts/rawg_backfill.py --limit 50 --offset 200
     python scripts/rawg_backfill.py --chunk-size 100  # one bounded, stateful chunk
     python scripts/rawg_backfill.py --chunk-size 100 --max-chunks 5
+    python scripts/rawg_backfill.py --chunk-size 100 --retry-stale-days 7   # retry no_match rows older than 7 days
+    python scripts/rawg_backfill.py --chunk-size 100 --retry-stale-days 0   # never retry no_match rows
     python scripts/rawg_backfill.py --cleanup-unsafe-state --dry-run
     python scripts/rawg_backfill.py --cleanup-unsafe-state
     python scripts/rawg_backfill.py --fix-steam       # fix games that have rawg_slug but no steam_app_id
@@ -85,11 +94,32 @@ def _save_state(path: Path, state: dict) -> None:
     tmp_path.replace(path)
 
 
-def _state_skip_ids(state: dict, retry_errors: bool) -> set[str]:
+def _is_stale_no_match(attempted_at: str | None, retry_stale_days: int, now: datetime) -> bool:
+    """True if a no_match attempt is old enough to retry (or has no parseable timestamp)."""
+    if not attempted_at:
+        return True
+    try:
+        attempted_dt = datetime.fromisoformat(attempted_at)
+    except ValueError:
+        return True
+    if attempted_dt.tzinfo is None:
+        attempted_dt = attempted_dt.replace(tzinfo=timezone.utc)
+    age_days = (now - attempted_dt).total_seconds() / 86400
+    return age_days >= retry_stale_days
+
+
+def _state_skip_ids(state: dict, retry_errors: bool, retry_stale_days: int) -> set[str]:
     skipped: set[str] = set()
+    now = datetime.now(timezone.utc)
     for game_id, attempt in state.get("rawg_missing", {}).items():
         status = attempt.get("status")
-        if status in {"matched", "no_match"} or (status == "error" and not retry_errors):
+        if status == "matched":
+            skipped.add(str(game_id))
+        elif status == "no_match":
+            if retry_stale_days > 0 and _is_stale_no_match(attempt.get("attempted_at"), retry_stale_days, now):
+                continue
+            skipped.add(str(game_id))
+        elif status == "error" and not retry_errors:
             skipped.add(str(game_id))
     return skipped
 
@@ -170,19 +200,40 @@ def _get_unattempted_games_missing_rawg(
 
 
 def _get_games_missing_steam(client, limit: int, offset: int) -> list[dict]:
-    """Return games that have rawg_slug but are still missing steam_app_id."""
-    q = (
-        client.table("games")
-        .select("game_id, title, rawg_slug")
-        .not_.is_("rawg_slug", "null")
-        .is_("steam_app_id", "null")
-        .order("title")
-    )
-    if offset:
-        q = q.range(offset, offset + (limit or 10_000) - 1)
-    elif limit:
-        q = q.limit(limit)
-    return q.execute().data
+    """Return games that have rawg_slug but are still missing steam_app_id.
+
+    Paginates internally in FETCH_PAGE_SIZE chunks (same pattern as
+    _get_unattempted_games_missing_rawg) so the candidate set isn't silently
+    truncated by PostgREST's default page size. `limit` still bounds how many
+    rows are returned (and therefore processed) in one call.
+    """
+    selected: list[dict] = []
+    page_offset = offset
+
+    while True:
+        rows = (
+            client.table("games")
+            .select("game_id, title, rawg_slug")
+            .not_.is_("rawg_slug", "null")
+            .is_("steam_app_id", "null")
+            .order("title")
+            .range(page_offset, page_offset + FETCH_PAGE_SIZE - 1)
+            .execute()
+            .data
+            or []
+        )
+        if not rows:
+            break
+
+        selected.extend(rows)
+        if limit and len(selected) >= limit:
+            return selected[:limit]
+
+        if len(rows) < FETCH_PAGE_SIZE:
+            break
+        page_offset += FETCH_PAGE_SIZE
+
+    return selected
 
 
 def _fix_steam_pass(api_key: str, db, limit: int, offset: int, dry_run: bool) -> None:
@@ -322,6 +373,7 @@ def _chunked_rawg_pass(
     dry_run: bool,
     state_path: Path,
     retry_errors: bool,
+    retry_stale_days: int,
 ) -> None:
     client = db if not dry_run else get_client()
     state = _load_state(state_path)
@@ -338,7 +390,7 @@ def _chunked_rawg_pass(
     attempted_this_run: set[str] = set()
 
     for chunk_number in range(1, max_chunks + 1):
-        skip_ids = _state_skip_ids(state, retry_errors) | attempted_this_run
+        skip_ids = _state_skip_ids(state, retry_errors, retry_stale_days) | attempted_this_run
         games = _get_unattempted_games_missing_rawg(client, limit=chunk_size, skip_ids=skip_ids)
         if not games:
             print("No unattempted games remain in the missing-RAWG backlog.")
@@ -426,6 +478,7 @@ def main(
     max_chunks: int,
     state_file: str,
     retry_errors: bool,
+    retry_stale_days: int,
     cleanup_unsafe_state: bool,
 ) -> None:
     if cleanup_unsafe_state:
@@ -453,6 +506,9 @@ def main(
         if chunk_size < 1 or max_chunks < 1:
             print("ERROR: --chunk-size and --max-chunks must be positive integers.")
             sys.exit(2)
+        if retry_stale_days < 0:
+            print("ERROR: --retry-stale-days must be zero or a positive integer.")
+            sys.exit(2)
 
         _chunked_rawg_pass(
             api_key=api_key,
@@ -462,6 +518,7 @@ def main(
             dry_run=dry_run,
             state_path=Path(state_file),
             retry_errors=retry_errors,
+            retry_stale_days=retry_stale_days,
         )
         return
 
@@ -502,6 +559,13 @@ if __name__ == "__main__":
     parser.add_argument("--max-chunks", type=int, default=1, metavar="N", help="Number of chunks to process in chunk mode.")
     parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE), help="State file used by chunk mode.")
     parser.add_argument("--retry-errors", action="store_true", help="Retry rows previously recorded as errors in chunk state.")
+    parser.add_argument(
+        "--retry-stale-days",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Retry chunk-state 'no_match' rows last attempted at least N days ago (0 disables). Default: 30.",
+    )
     parser.add_argument("--cleanup-unsafe-state", action="store_true", help="Revert unsafe matches recorded in the chunk state.")
     parser.add_argument("--fix-steam", action="store_true", help="Fix games that have rawg_slug but no steam_app_id.")
     args = parser.parse_args()
@@ -514,5 +578,6 @@ if __name__ == "__main__":
         max_chunks=args.max_chunks,
         state_file=args.state_file,
         retry_errors=args.retry_errors,
+        retry_stale_days=args.retry_stale_days,
         cleanup_unsafe_state=args.cleanup_unsafe_state,
     )
