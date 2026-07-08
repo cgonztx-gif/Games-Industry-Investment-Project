@@ -18,6 +18,7 @@ from agents.workers.patch_notes import worker as patch_notes_worker
 from agents.workers.studio_intel import worker as studio_intel_worker
 from agents.workers.news import worker as news_worker
 from agents.workers.sentiment import worker as sentiment_worker
+from agents.workers.discovery import worker as discovery_worker
 from agents.portfolio import manager as portfolio_manager
 from agents.portfolio import execution_agent
 from agents.portfolio import returns_tracker
@@ -68,6 +69,18 @@ if __name__ == "__main__":
             f"{sentiment_result['error_count']} errors | "
             f"reddit_blocked={sentiment_result['reddit_blocked_count']}"
         )
+
+        print("\n" + "=" * 60)
+        print("=== Discovery (New Watchlist Candidates) ===")
+        print("=" * 60)
+        discovery_result = traced_step("discovery_worker")(discovery_worker.run)()
+        print(
+            f"Discovery: {discovery_result['proposals_written']} proposals written "
+            f"({discovery_result['game_level_count']} game-level, "
+            f"{discovery_result['company_level_count']} company-level) | "
+            f"{discovery_result['error_count']} errors"
+        )
+        print("Review with: select * from watchlist_proposals where status = 'pending';")
 
         print("\n" + "=" * 60)
         print("=== Synthesis & Weekly Briefing ===")

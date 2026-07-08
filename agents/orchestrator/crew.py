@@ -126,8 +126,15 @@ task_financial = Task(
 )
 
 task_discovery = Task(
-    description="Return the string OK. (Placeholder — discovery logic added in Phase 6.)",
-    expected_output="OK",
+    description=(
+        "New watchlist candidates have already been scanned by the discovery "
+        "worker module (Steam top-CCU, IGDB upcoming releases, SEC EDGAR new-"
+        "company filings, and Reddit mention-volume corroboration) and written "
+        "to the watchlist_proposals table with status='pending'. Confirm that "
+        "candidate discovery completed successfully. (Human review/approval "
+        "queue is a Phase 7 dashboard item.)"
+    ),
+    expected_output="Discovery candidate scan complete.",
     agent=discovery,
 )
 

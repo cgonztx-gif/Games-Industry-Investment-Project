@@ -30,8 +30,9 @@ def get_account_state() -> dict:
 
     Hits GET /v2/account and GET /v2/positions (field names verified against
     Alpaca's TradeAccount/Position models: cash/buying_power/portfolio_value
-    on the account, symbol/qty/market_value on each position -- all returned
-    by Alpaca as decimal strings, coerced to float here).
+    on the account, symbol/qty/market_value/avg_entry_price/current_price/
+    unrealized_pl on each position -- all returned by Alpaca as decimal
+    strings, coerced to float here).
 
     Raises the same way `_headers()` already does today (KeyError) if
     ALPACA_API_KEY / ALPACA_SECRET_KEY are unset, and raises
@@ -63,6 +64,9 @@ def get_account_state() -> dict:
                 "ticker": p["symbol"],
                 "qty": float(p["qty"]),
                 "market_value": float(p["market_value"]),
+                "avg_entry_price": float(p["avg_entry_price"]),
+                "current_price": float(p["current_price"]),
+                "unrealized_pnl": float(p["unrealized_pl"]),
             }
             for p in positions
         ],

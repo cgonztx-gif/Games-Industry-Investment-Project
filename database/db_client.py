@@ -226,11 +226,14 @@ def get_watchlist_tickers(client: Client) -> list[dict]:
     Return one row per ticker with simple materiality context.
 
     The representative studio_id is the studio with the most active tracked games
-    for that ticker, not whichever studio happens to appear first.
+    for that ticker, not whichever studio happens to appear first. ``game_ids``
+    and ``studio_ids`` (the full set, not just the representative) are included
+    so callers can pull per-game/per-studio signals for a composite health score
+    without a second round trip.
     """
     resp = (
         client.table("watchlist")
-        .select("ticker, studio_id")
+        .select("ticker, studio_id, game_id")
         .not_.is_("ticker", "null")
         .eq("active", True)
         .execute()
@@ -239,11 +242,16 @@ def get_watchlist_tickers(client: Client) -> list[dict]:
     for row in resp.data:
         t = row["ticker"]
         studio_id = row.get("studio_id")
-        grouped.setdefault(t, {"studio_counts": {}, "tracked_games": 0})
-        grouped[t]["tracked_games"] += 1
+        game_id = row.get("game_id")
+        entry = grouped.setdefault(
+            t, {"studio_counts": {}, "tracked_games": 0, "game_ids": [], "studio_ids": set()}
+        )
+        entry["tracked_games"] += 1
+        if game_id:
+            entry["game_ids"].append(game_id)
         if studio_id:
-            counts = grouped[t]["studio_counts"]
-            counts[studio_id] = counts.get(studio_id, 0) + 1
+            entry["studio_counts"][studio_id] = entry["studio_counts"].get(studio_id, 0) + 1
+            entry["studio_ids"].add(studio_id)
 
     result = []
     for ticker, item in grouped.items():
@@ -257,6 +265,8 @@ def get_watchlist_tickers(client: Client) -> list[dict]:
                 "studio_id": representative,
                 "tracked_games": item["tracked_games"],
                 "mapped_studios": len(studio_counts),
+                "game_ids": item["game_ids"],
+                "studio_ids": sorted(item["studio_ids"]),
             }
         )
     return result
@@ -265,6 +275,76 @@ def get_watchlist_tickers(client: Client) -> list[dict]:
 def write_equity_metrics(client: Client, metrics: dict) -> None:
     """Upsert one equity_signals row. Safe to call multiple times per (ticker, date)."""
     client.table("equity_signals").upsert(metrics, on_conflict="ticker,date").execute()
+
+
+def get_recent_player_metrics_for_games(
+    client: Client, game_ids: list[str], since_date: str
+) -> list[dict]:
+    """player_metrics rows for these games on/after since_date, for health-score momentum."""
+    if not game_ids:
+        return []
+    resp = (
+        client.table("player_metrics")
+        .select("game_id, date, concurrent_players")
+        .in_("game_id", game_ids)
+        .gte("date", since_date)
+        .execute()
+    )
+    return resp.data or []
+
+
+def get_recent_community_sentiment_for_games(
+    client: Client, game_ids: list[str], since_date: str
+) -> list[dict]:
+    """
+    Community (non-news) sentiment_snapshots rows for these games on/after
+    since_date, for health-score input. Excludes source='news' for the same
+    reason agents/synthesis/agent.py::_sentiment_by_game() does -- media
+    framing measures a different axis than community sentiment.
+    """
+    if not game_ids:
+        return []
+    resp = (
+        client.table("sentiment_snapshots")
+        .select("game_id, date, sentiment_score")
+        .in_("game_id", game_ids)
+        .neq("source", "news")
+        .gte("date", since_date)
+        .execute()
+    )
+    return resp.data or []
+
+
+def get_recent_patch_events_for_games(
+    client: Client, game_ids: list[str], since_date: str
+) -> list[dict]:
+    """patch_events rows for these games on/after since_date, for cadence-status input."""
+    if not game_ids:
+        return []
+    resp = (
+        client.table("patch_events")
+        .select("game_id, date, cadence_status")
+        .in_("game_id", game_ids)
+        .gte("date", since_date)
+        .execute()
+    )
+    return resp.data or []
+
+
+def get_recent_studio_signals_for_studios(
+    client: Client, studio_ids: list[str], since_date: str
+) -> list[dict]:
+    """studio_signals rows for these studios on/after since_date, for distress input."""
+    if not studio_ids:
+        return []
+    resp = (
+        client.table("studio_signals")
+        .select("studio_id, date, severity")
+        .in_("studio_id", studio_ids)
+        .gte("date", since_date)
+        .execute()
+    )
+    return resp.data or []
 
 
 # ---------------------------------------------------------------------------
@@ -662,3 +742,105 @@ def get_earliest_portfolio_snapshot(client: Client) -> Optional[dict]:
 def write_portfolio_snapshot(client: Client, snapshot: dict) -> None:
     """Upsert one portfolio_snapshots row. Safe to call multiple times per date."""
     client.table("portfolio_snapshots").upsert(snapshot, on_conflict="date").execute()
+
+
+def write_current_positions(client: Client, positions: list[dict]) -> None:
+    """
+    Replace the entire `positions` table with the given rows.
+
+    `positions` has no unique constraint to upsert against (see schema.sql) and
+    is meant to mirror Alpaca's *current* open positions, not accumulate a
+    per-run history -- portfolio_snapshots already owns the value-over-time
+    view. Delete-then-insert keeps it a clean live mirror: a position fully
+    closed since the last run correctly disappears instead of lingering as a
+    stale row.
+    """
+    client.table("positions").delete().gte("as_of", "1900-01-01").execute()
+    if positions:
+        client.table("positions").insert(positions).execute()
+
+
+# ---------------------------------------------------------------------------
+# Discovery worker helpers
+# ---------------------------------------------------------------------------
+
+def get_active_watchlist_external_ids(client: Client) -> dict[str, set[str]]:
+    """
+    Return {igdb_ids, steam_ids} for every *active* watchlist row, regardless of
+    added_by. Unlike get_seeded_external_ids (seed-only, used for seed-script
+    idempotency), Discovery needs to exclude anything already actively tracked
+    no matter how it got there.
+    """
+    resp = (
+        client.table("watchlist")
+        .select("games(igdb_id, steam_app_id)")
+        .eq("active", True)
+        .execute()
+    )
+    igdb_ids: set[str] = set()
+    steam_ids: set[str] = set()
+    for row in resp.data:
+        game = row.get("games") or {}
+        if game.get("igdb_id"):
+            igdb_ids.add(game["igdb_id"])
+        if game.get("steam_app_id"):
+            steam_ids.add(game["steam_app_id"])
+    return {"igdb_ids": igdb_ids, "steam_ids": steam_ids}
+
+
+def get_tracked_game_counts_by_studio(client: Client) -> dict[str, int]:
+    """Count of active watchlist games per studio_id, for the uniqueness score component."""
+    resp = (
+        client.table("watchlist")
+        .select("studio_id")
+        .eq("active", True)
+        .execute()
+    )
+    counts: dict[str, int] = {}
+    for row in resp.data:
+        studio_id = row.get("studio_id")
+        if studio_id:
+            counts[studio_id] = counts.get(studio_id, 0) + 1
+    return counts
+
+
+def get_existing_proposal_status(client: Client, game_id: str) -> Optional[str]:
+    """Most recent watchlist_proposals status for a game, or None if never proposed."""
+    resp = (
+        client.table("watchlist_proposals")
+        .select("status")
+        .eq("game_id", game_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0]["status"] if resp.data else None
+
+
+def get_existing_company_proposal_status(client: Client, studio_id: str) -> Optional[str]:
+    """
+    Most recent watchlist_proposals status for a company-level (game_id IS NULL)
+    EDGAR proposal tied to this studio_id, or None if never proposed.
+    """
+    resp = (
+        client.table("watchlist_proposals")
+        .select("status")
+        .eq("studio_id", studio_id)
+        .is_("game_id", "null")
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0]["status"] if resp.data else None
+
+
+def write_watchlist_proposal(client: Client, proposal: dict) -> bool:
+    """
+    Insert one watchlist_proposals row. Returns True if inserted.
+
+    No idempotency check here -- callers (discovery/worker.py) already gate on
+    get_existing_proposal_status/get_existing_company_proposal_status before
+    calling this, same division of responsibility as write_studio_signal.
+    """
+    client.table("watchlist_proposals").insert(proposal).execute()
+    return True

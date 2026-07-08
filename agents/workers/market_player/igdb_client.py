@@ -14,6 +14,16 @@ _GAME_FIELDS = (
     "first_release_date, platforms.name;"
 )
 
+# Adds hype (IGDB's pre-release "interested" counter) and involved_companies
+# for the Discovery worker's upcoming-release trigger. Kept separate from
+# _GAME_FIELDS/_parse_game so get_games_by_company/get_recent_releases are
+# untouched.
+_UPCOMING_FIELDS = (
+    "fields id, name, genres.name, game_modes.name, first_release_date, "
+    "platforms.name, hypes, involved_companies.company.name, "
+    "involved_companies.developer, involved_companies.publisher;"
+)
+
 
 def get_access_token(client_id: str, client_secret: str) -> str:
     resp = requests.post(
@@ -118,6 +128,54 @@ def get_games_by_company(client_id: str, token: str, company_id: int) -> list[di
         if not batch:
             break
         games.extend(_parse_game(g) for g in batch)
+        if len(batch) < 500:
+            break
+        offset += 500
+    return games
+
+
+def _parse_upcoming_game(raw: dict) -> dict:
+    game = _parse_game(raw)
+    game["hype"] = raw.get("hypes") or 0
+    studio_name = None
+    for involved in raw.get("involved_companies") or []:
+        company = involved.get("company") or {}
+        name = company.get("name")
+        if not name:
+            continue
+        if involved.get("developer"):
+            studio_name = name
+            break
+        if studio_name is None:
+            studio_name = name  # fall back to publisher if no developer flagged
+    game["studio_name"] = studio_name
+    return game
+
+
+def get_upcoming_releases(client_id: str, token: str, days_ahead: int = 60) -> list[dict]:
+    """
+    Fetch games releasing in the next `days_ahead` days, with hype and a
+    best-effort studio name from involved_companies (developer preferred over
+    publisher). Used by the Discovery worker's upcoming-release trigger --
+    ticker resolution still happens by matching studio_name against already-
+    known studios; this function never guesses a ticker itself.
+    """
+    now_ts = int(datetime.now().timestamp())
+    cutoff_ts = int((datetime.now() + timedelta(days=days_ahead)).timestamp())
+    games = []
+    offset = 0
+    while offset < 2000:
+        body = (
+            f"{_UPCOMING_FIELDS}"
+            f" where first_release_date > {now_ts}"
+            f" & first_release_date < {cutoff_ts};"
+            f" sort hypes desc;"
+            f" limit 500; offset {offset};"
+        )
+        batch = _post("games", body, client_id, token)
+        if not batch:
+            break
+        games.extend(_parse_upcoming_game(g) for g in batch)
         if len(batch) < 500:
             break
         offset += 500

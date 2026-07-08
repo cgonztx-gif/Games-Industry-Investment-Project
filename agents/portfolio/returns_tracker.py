@@ -35,9 +35,15 @@ parameter defaulting to the real implementation (matching manager.py /
 execution_agent.py), so tests drive the full flow with plain fakes and zero live
 network/DB/API calls.
 
-Known gap (out of scope): the schema's ``positions`` table (per-position P&L /
-holding period) has no readers or writers anywhere in the codebase and no
-holding-period column, so the brief's per-position P&L view is not produced here.
+Per-position snapshot (``positions`` table): each successful run also replaces
+the ``positions`` table with the current open positions from the same
+``get_account_state()`` call (ticker/qty/avg_entry_price/current_price/
+unrealized_pnl) via ``write_current_positions`` -- delete-then-insert, since the
+table mirrors Alpaca's *live* open positions rather than accumulating a
+per-run history (portfolio_snapshots already owns that time series). Known
+limitation: ``signal_source`` is left unset, since an open position can be the
+net result of multiple orders across multiple weeks/plans and there is no
+reliable one-to-one mapping back to a single originating trade_plan.
 """
 
 from __future__ import annotations
@@ -57,6 +63,7 @@ from database.api_cache import SupabaseApiCache
 from database.db_client import (
     get_client,
     get_earliest_portfolio_snapshot,
+    write_current_positions,
     write_portfolio_snapshot,
 )
 
@@ -73,6 +80,7 @@ def run(
     get_alpaca_spy_close_fn=get_historical_close_alpaca,
     get_yfinance_spy_close_fn=get_historical_close_yf,
     write_snapshot_fn=write_portfolio_snapshot,
+    write_positions_fn=write_current_positions,
     cache=None,
 ) -> dict | None:
     """
@@ -92,6 +100,21 @@ def run(
 
     total_value = account["portfolio_value"]
     cash = account["cash"]
+
+    position_rows = [
+        {
+            "ticker": p["ticker"],
+            "qty": p["qty"],
+            "avg_entry_price": p["avg_entry_price"],
+            "current_price": p["current_price"],
+            "unrealized_pnl": p["unrealized_pnl"],
+        }
+        for p in account.get("positions", [])
+    ]
+    try:
+        write_positions_fn(active_db, position_rows)
+    except Exception as exc:  # noqa: BLE001 -- positions mirror is best-effort
+        print(f"[returns tracker] positions snapshot write failed: {exc}")
 
     baseline_row = get_earliest_snapshot_fn(active_db)
 

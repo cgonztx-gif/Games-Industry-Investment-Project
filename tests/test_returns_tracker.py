@@ -30,12 +30,22 @@ class _Recorder:
         self.rows.append(row)
 
 
-def _account(portfolio_value, cash=1000.0):
+class _PositionsRecorder:
+    """Records every (db, positions) passed to the positions writer."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, db, positions):
+        self.calls.append(positions)
+
+
+def _account(portfolio_value, cash=1000.0, positions=None):
     return lambda: {
         "portfolio_value": portfolio_value,
         "cash": cash,
         "buying_power": portfolio_value,
-        "positions": [],
+        "positions": positions if positions is not None else [],
     }
 
 
@@ -56,6 +66,7 @@ def _run(**overrides):
         get_alpaca_spy_close_fn=lambda ticker, on_date: None,
         get_yfinance_spy_close_fn=lambda ticker, on_date, cache=None: None,
         write_snapshot_fn=_Recorder(),
+        write_positions_fn=_PositionsRecorder(),
     )
     kwargs.update(overrides)
     return returns_tracker.run(**kwargs), kwargs["write_snapshot_fn"]
@@ -148,6 +159,7 @@ def test_same_run_date_twice_takes_the_upsert_path_both_times():
         get_account_state_fn=_account(100000.0),
         get_earliest_snapshot_fn=lambda db: None,
         write_snapshot_fn=writer,
+        write_positions_fn=_PositionsRecorder(),
     )
     returns_tracker.run(**common)
     returns_tracker.run(**common)
@@ -164,3 +176,52 @@ def test_zero_baseline_value_yields_null_return_without_crashing():
         get_latest_spy_price_fn=lambda ticker: 525.0,
     )
     assert writer.rows[0]["total_return_pct"] is None
+
+
+def test_positions_written_with_per_position_fields_from_account_state():
+    positions_writer = _PositionsRecorder()
+    _run(
+        get_account_state_fn=_account(
+            110000.0,
+            positions=[
+                {
+                    "ticker": "RBLX",
+                    "qty": 10.0,
+                    "market_value": 4500.0,
+                    "avg_entry_price": 400.0,
+                    "current_price": 450.0,
+                    "unrealized_pnl": 500.0,
+                }
+            ],
+        ),
+        write_positions_fn=positions_writer,
+    )
+    assert len(positions_writer.calls) == 1
+    rows = positions_writer.calls[0]
+    assert rows == [
+        {
+            "ticker": "RBLX",
+            "qty": 10.0,
+            "avg_entry_price": 400.0,
+            "current_price": 450.0,
+            "unrealized_pnl": 500.0,
+        }
+    ]
+
+
+def test_no_open_positions_still_calls_writer_with_empty_list():
+    positions_writer = _PositionsRecorder()
+    _run(get_account_state_fn=_account(100000.0), write_positions_fn=positions_writer)
+    assert positions_writer.calls == [[]]
+
+
+def test_positions_write_failure_does_not_prevent_snapshot():
+    def _boom_positions(db, positions):
+        raise RuntimeError("positions table unreachable")
+
+    result, writer = _run(
+        get_account_state_fn=_account(100000.0),
+        write_positions_fn=_boom_positions,
+    )
+    assert result is not None
+    assert len(writer.rows) == 1
