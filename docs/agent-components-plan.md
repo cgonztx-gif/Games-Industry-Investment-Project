@@ -121,9 +121,13 @@ The skill's `SKILL.md` would encode:
 - `reddit_source` — fetch top/hot posts and comments from game subreddits via the public read-only `.json` endpoints (the official Data API is not used); rate-limited, cached, and degrades gracefully when blocked (see the *RedditSource Adapter* and *SupabaseRedditCache* designs). Comment fetches respect the per-game sentiment tier set at seeding.
 - `youtube_data_api` — comment extraction on patch/review/update videos via the **official Data API** (`commentThreads.list` = 1 quota unit per 100 comments against a free 10,000-unit daily quota; `search.list` is avoided — it costs 100 units and sits in its own tightly capped bucket, so video discovery goes through tracked channels' upload playlists at 1 unit per 50 videos instead). Handles `commentsDisabled` as a normal miss, not an error.
 - `steam_reviews_api` — review text + helpfulness weighting via the public `appreviews` endpoint
+- `news_items_read` — this week's news articles already matched to the game by the standalone news-ingestion module (`agents/workers/news/`, not owned by this subagent — see the note below); fed into a separate stance/frame classifier (`news_stance_client.py`), not the VADER/ABSA pipeline below
 - `vader_score` — bundled deterministic lexicon scorer (baseline)
 - `db_read` — **last week's** `PlayerMetrics` only, for the optional lagged preliminary flag (step 4 below)
 - *(no `x_api` at MVP — X access is pay-per-use as of Feb 2026 and deferred; see the risk register for the cost math and revisit criteria)*
+
+### Note: news is ingested outside this subagent
+Games-industry news (GDELT + curated games-press RSS + Google News fallback) is fetched, deduped, and matched to watchlist entities by a **standalone `agents/workers/news/` module**, not by this subagent's own tools — one article often spans multiple watchlist entities, and Studio Intel / a future Discovery agent may want to read the same matched articles for their own purposes, so the fetch+match step lives outside any single subagent. This subagent only *reads* the result (`news_items_read`) and scores it. See `docs/news-source-decision-memo.md` for the full rationale, including why news gets its own stance/frame classification (§3) instead of reusing the ABSA aspect vocabulary below.
 
 ### Skill: `sentiment-analysis-methodology`
 The research is clear that the best-in-class approach is a **hybrid VADER + LLM pipeline with aspect-based analysis**, not either alone. The skill encodes this methodology:
@@ -140,7 +144,7 @@ The research is clear that the best-in-class approach is a **hybrid VADER + LLM 
 
 6. **Consistency checks:** Lightweight rule-based validation so scores stay stable across different game vocabularies.
 
-**Output contract:** per-game sentiment score (1–10), top 3 aspect-themes with polarity, week-over-week trend, vocal-minority confidence note, and (optional, labeled) lagged preliminary flag — persisted for the Synthesis Agent's divergence check.
+**Output contract:** per-game sentiment score (1–10), top 3 aspect-themes with polarity, week-over-week trend, vocal-minority confidence note, and (optional, labeled) lagged preliminary flag — persisted for the Synthesis Agent's divergence check. News (`source='news'`) writes the same row shape but with a media stance score + narrative frames in place of the ABSA aspects, and no vocal-minority note (replaced by an outlet-breadth note) — Synthesis keeps it in a separate `news_score`, never averaged into community `avg_score`.
 
 **Why this lives in a subagent:** reading hundreds of posts is exactly the high-volume, noisy work that should be isolated. Only the structured output returns to the orchestrator.
 

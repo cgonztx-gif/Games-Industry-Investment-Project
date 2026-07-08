@@ -16,6 +16,7 @@ from agents.workers.financial_overlay import worker as financial_worker
 from agents.workers.market_player import worker as market_worker
 from agents.workers.patch_notes import worker as patch_notes_worker
 from agents.workers.studio_intel import worker as studio_intel_worker
+from agents.workers.news import worker as news_worker
 from agents.workers.sentiment import worker as sentiment_worker
 from agents.portfolio import manager as portfolio_manager
 from agents.portfolio import execution_agent
@@ -49,7 +50,17 @@ if __name__ == "__main__":
         print(f"Patch notes: {patch_result['events_written']} events written | {patch_result['error_count']} errors")
 
         print("\n" + "=" * 60)
-        print("=== Sentiment Analysis (Reddit + Steam) ===")
+        print("=== News Article Ingestion ===")
+        print("=" * 60)
+        news_result = traced_step("news_worker")(news_worker.run)()
+        print(
+            f"News: {news_result['items_written']} articles matched | "
+            f"{news_result['articles_fetched']} fetched | "
+            f"{news_result['entities_with_coverage']} entities with coverage"
+        )
+
+        print("\n" + "=" * 60)
+        print("=== Sentiment Analysis (Reddit + Steam + News) ===")
         print("=" * 60)
         sentiment_result = traced_step("sentiment_worker")(sentiment_worker.run)()
         print(

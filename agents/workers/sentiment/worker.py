@@ -1,28 +1,38 @@
 """
 Sentiment Worker - Phase 2
 
-Fetches Steam reviews, Reddit discussion, and configured YouTube comments for
-every active watchlist game, scores them with VADER + Claude Haiku ABSA, and
-writes one row per (game_id, date, source) into sentiment_snapshots.
+Fetches Steam reviews, Reddit discussion, configured YouTube comments, and
+this week's matched news coverage for every active watchlist game. Steam/
+Reddit/YouTube are scored with VADER + Claude Haiku ABSA (community
+sentiment); news is scored separately with a media stance/frame classifier
+(news_stance_client.py) since it measures a different axis (see
+docs/news-source-decision-memo.md §3) -- source='news' rows are NOT
+VADER/ABSA-scored. Writes one row per (game_id, date, source) into
+sentiment_snapshots.
 
 Prerequisites:
   - database/migrations/001_sentiment_snapshots_unique.sql
   - database/migrations/002_api_cache.sql
   - database/migrations/003_watchlist_sentiment_targets.sql
+  - database/migrations/008_news_items.sql
+  - agents/workers/news/worker.py must have run earlier this week so
+    get_recent_news_items() has matched articles to read.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 from database.api_cache import SupabaseApiCache
 from database.db_client import (
     get_client,
     get_last_player_metrics,
+    get_recent_news_items,
     get_watchlist_games,
     update_watchlist_subreddit,
     write_sentiment_snapshot,
 )
 from agents.workers.sentiment.absa_client import run_absa
 from agents.workers.sentiment.divergence import compute_divergence
+from agents.workers.sentiment.news_stance_client import classify_stance
 from agents.workers.sentiment.reddit_cache import SupabaseRedditCache
 from agents.workers.sentiment.reddit_source import (
     RedditBlocked,
@@ -34,6 +44,8 @@ from agents.workers.sentiment.reddit_source import (
 from agents.workers.sentiment.steam_reviews_client import fetch_steam_reviews
 from agents.workers.sentiment.vader_scorer import score_texts
 from agents.workers.sentiment.youtube_client import fetch_youtube_comments
+
+_NEWS_LOOKBACK_DAYS = 7
 
 _MIN_TEXTS_FOR_ABSA = 5
 _TIER_A_COMMENT_POSTS = 10
@@ -70,6 +82,46 @@ def _write_source_snapshot(
             "top_themes": themes,
             "divergence_flag": flag,
             "vocal_minority_note": note,
+        },
+    )
+    return True
+
+
+def _write_news_snapshot(
+    db,
+    *,
+    game_id: str,
+    title: str,
+    today: str,
+    news_items: list[dict],
+    sentiment_tier: str,
+    player_metrics: dict | None,
+) -> bool:
+    """
+    News gets its own aggregate stance/frame classification, not the VADER +
+    ABSA + vocal-minority pipeline _write_source_snapshot runs for community
+    sources -- see news_stance_client.py's docstring. classify_stance()
+    returning None (any failure) means skip writing this row entirely, since
+    that call *is* the score, not an enrichment on top of one.
+    """
+    if not news_items:
+        return False
+
+    stance = classify_stance(title, news_items, sentiment_tier=sentiment_tier)
+    if stance is None:
+        return False
+
+    flag, note = compute_divergence(stance["score"], player_metrics)
+    write_sentiment_snapshot(
+        db,
+        {
+            "game_id": game_id,
+            "date": today,
+            "source": "news",
+            "sentiment_score": stance["score"],
+            "top_themes": stance["themes"],
+            "divergence_flag": flag,
+            "vocal_minority_note": f"{stance['outlet_count']} outlets — {stance['coverage_note']}",
         },
     )
     return True
@@ -116,7 +168,9 @@ def _reddit_texts_for_game(reddit_source, subreddit: str, sentiment_tier: str) -
 
 def run() -> dict:
     db = get_client()
-    today = date.today().isoformat()
+    today_date = date.today()
+    today = today_date.isoformat()
+    news_since = (today_date - timedelta(days=_NEWS_LOOKBACK_DAYS)).isoformat()
     games = get_watchlist_games(db)
 
     lookup_cache = SupabaseRedditCache(client=db, source="subreddit_lookup")
@@ -196,6 +250,17 @@ def run() -> dict:
                 today=today,
                 source="youtube",
                 texts_with_weights=youtube_comments,
+                player_metrics=player_metrics,
+            ) or wrote_any
+
+            news_items = get_recent_news_items(db, game_id, since=news_since)
+            wrote_any = _write_news_snapshot(
+                db,
+                game_id=game_id,
+                title=title,
+                today=today,
+                news_items=news_items,
+                sentiment_tier=sentiment_tier,
                 player_metrics=player_metrics,
             ) or wrote_any
 

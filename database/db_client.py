@@ -332,6 +332,60 @@ def update_game_rawg_data(client: Client, game_id: str, updates: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# News worker helpers
+# ---------------------------------------------------------------------------
+
+def get_watchlist_entities_with_aliases(client: Client) -> list[dict]:
+    """
+    Return all active watchlist games joined with alias/ambiguity columns and
+    studio name, for news-relevance matching (agents/workers/news/entity_matcher.py).
+    """
+    resp = (
+        client.table("watchlist")
+        .select(
+            "id, game_id, "
+            "games(game_id, title, aliases, title_is_ambiguous, studios(name))"
+        )
+        .eq("active", True)
+        .execute()
+    )
+    result = []
+    for row in resp.data:
+        game = row.get("games")
+        if not game:
+            continue
+        studio = game.get("studios") or {}
+        result.append(
+            {
+                "game_id": game["game_id"],
+                "title": game["title"],
+                "aliases": game.get("aliases") or [],
+                "title_is_ambiguous": bool(game.get("title_is_ambiguous")),
+                "studio_name": studio.get("name"),
+                "watchlist_id": row["id"],
+            }
+        )
+    return result
+
+
+def write_news_item(client: Client, item: dict) -> None:
+    """Upsert one news_items row, keyed by url."""
+    client.table("news_items").upsert(item, on_conflict="url").execute()
+
+
+def get_recent_news_items(client: Client, game_id: str, since: str) -> list[dict]:
+    """Return news_items rows matched to game_id, published on/after `since`."""
+    resp = (
+        client.table("news_items")
+        .select("*")
+        .contains("matched_entities", [game_id])
+        .gte("published_at", since)
+        .execute()
+    )
+    return resp.data or []
+
+
+# ---------------------------------------------------------------------------
 # Sentiment worker helpers
 # ---------------------------------------------------------------------------
 

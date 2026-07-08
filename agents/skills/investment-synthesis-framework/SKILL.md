@@ -36,6 +36,11 @@ For each game, build a compact weekly state:
 
 - Product health: CCU, review velocity, review score, trend status.
 - Sentiment: average score by source, top themes, vocal-minority note.
+  **`source='news'` is media tone/stance, not community sentiment** (see
+  `agents/workers/sentiment/news_stance_client.py`) — it lives in its own
+  `news_score`/`news_themes`, never blended into `avg_score` with
+  reddit/steam/youtube. `_sentiment_by_game()` in `agents/synthesis/agent.py`
+  enforces this split; do not reintroduce a source-agnostic average.
 - Patch cadence: patch types, cadence status, roadmap status, monetization flag.
 - Org health: studio-level signals and severity.
 - Equity context: ticker, materiality weight, earnings window, price context.
@@ -79,6 +84,11 @@ Primary cases:
   neutral. Interpret as silent churn or coverage gap.
 - `patch_cadence_bad_quant_stable`: patch cadence deteriorates before metrics do.
   Interpret as future retention risk.
+- `news_community_divergence`: community sentiment (`avg_score`) and media
+  tone (`news_score`) disagree by >= 2.5 points. This is source disagreement,
+  not a text-vs-quant check — treat it as a prompt to ask which is leading
+  (e.g. press covering a controversy the community hasn't reacted to yet, or
+  vice versa), not as a bullish/bearish verdict on its own.
 
 Any sentiment-side `Preliminary lagged flag` is superseded by this same-week
 check. Preserve it in the reasoning log only if it explains why the game was
@@ -200,3 +210,7 @@ Persist one row to `weekly_briefings`:
 - Do not generate trade orders here; portfolio sizing and approval are separate.
 - Treat stale Tier-2 fallback data as lower confidence and state that in the log.
 - Do not introduce Tier 4 sources during deep dives.
+- Never average `source='news'` sentiment_score into community `avg_score`
+  (or vice versa). They measure different things — media narrative framing
+  vs. player-experience sentiment — and blending them silently corrupts every
+  downstream divergence/risk check that reads `avg_score`.

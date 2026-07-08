@@ -16,6 +16,18 @@ from database.db_client import get_client, get_weekly_outputs, write_weekly_brie
 
 _MAX_DEEP_DIVES_PER_WEEK = 2
 
+# source='news' measures media tone/stance, not community sentiment (see
+# docs/news-source-decision-memo.md §3 and agents/workers/sentiment/
+# news_stance_client.py) -- it must never be averaged into avg_score
+# alongside reddit/steam/youtube. Kept as its own news_score/news_themes
+# field instead; see investment-synthesis-framework SKILL.md.
+_COMMUNITY_SOURCES = {"reddit", "steam", "youtube"}
+
+# Minimum |avg_score - news_score| gap (on the shared 1-10 scale) to surface
+# as a news_community_divergence signal -- source disagreement is itself a
+# signal, per the memo's "source disagreement is signal" thesis.
+_NEWS_COMMUNITY_DIVERGENCE_THRESHOLD = 2.5
+
 
 def _avg(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 2) if values else None
@@ -34,15 +46,16 @@ def _sentiment_by_game(sentiment_rows: list[dict]) -> dict[str, dict]:
     grouped = _group_by(sentiment_rows, "game_id")
     result: dict[str, dict] = {}
     for game_id, rows in grouped.items():
-        scores = [float(row["sentiment_score"]) for row in rows if row.get("sentiment_score") is not None]
-        themes = []
-        for row in rows:
-            for theme in row.get("top_themes") or []:
-                themes.append(theme)
+        community_rows = [r for r in rows if r.get("source") in _COMMUNITY_SOURCES]
+        news_rows = [r for r in rows if r.get("source") == "news"]
+        scores = [float(r["sentiment_score"]) for r in community_rows if r.get("sentiment_score") is not None]
+        news_scores = [float(r["sentiment_score"]) for r in news_rows if r.get("sentiment_score") is not None]
         result[game_id] = {
             "avg_score": _avg(scores),
-            "sources": sorted({row.get("source") for row in rows if row.get("source")}),
-            "themes": themes[:5],
+            "news_score": _avg(news_scores),
+            "sources": sorted({r.get("source") for r in rows if r.get("source")}),
+            "themes": [t for r in community_rows for t in (r.get("top_themes") or [])][:5],
+            "news_themes": [t for r in news_rows for t in (r.get("top_themes") or [])][:5],
         }
     return result
 
@@ -95,6 +108,26 @@ def _compute_divergence(outputs: dict) -> list[dict]:
                     "interpretation": (
                         "Positive text sentiment is not supported by same-week "
                         "quantitative momentum; treat as low-confidence until metrics improve."
+                    ),
+                }
+            )
+
+        news_score = sentiment.get("news_score")
+        if (
+            news_score is not None
+            and score is not None
+            and abs(score - news_score) >= _NEWS_COMMUNITY_DIVERGENCE_THRESHOLD
+        ):
+            divergences.append(
+                {
+                    "game_id": game_id,
+                    "type": "news_community_divergence",
+                    "sentiment_score": score,
+                    "news_score": news_score,
+                    "interpretation": (
+                        "Media coverage tone and community sentiment disagree this week "
+                        "(community=" + str(score) + ", news=" + str(news_score) + ") "
+                        "— worth checking which is leading."
                     ),
                 }
             )

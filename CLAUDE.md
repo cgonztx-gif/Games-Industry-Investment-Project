@@ -34,10 +34,11 @@ agents/
   orchestrator/       Lead orchestrator that dispatches workers
   workers/            Specialized data-collection subagents
     market_player/    Steam/IGDB/RAWG engagement metrics
-    sentiment/        Reddit/Steam review sentiment (VADER + Claude ABSA)
+    sentiment/        Reddit/Steam/YouTube/news sentiment (VADER + Claude ABSA; news gets its own stance/frame classifier)
     patch_notes/      Update cadence analysis
     studio_intel/     Job postings, press releases, SEC filings
     financial_overlay/ yfinance + SEC EDGAR equity mapping
+    news/             GDELT + curated RSS + Google News article ingestion & entity matching (feeds sentiment's news source)
     discovery/        New watchlist candidate proposals
   synthesis/          Synthesis agent (reads all worker outputs)
   portfolio/          Portfolio manager + execution subagent
@@ -84,6 +85,9 @@ Copy `.env.example` to `.env`. Required per phase:
 - `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN` (optional, all three required together) — activates `OAuthRedditSource`, an alternate egress for when the default unauthenticated path is IP-blocked. Requires completing Reddit's manual, non-guaranteed OAuth app-approval process (no SLA as of the Nov 2025 policy).
 - `REDDIT_PROXY_URL` (optional) — activates `ProxiedJsonRedditSource`, routing the default `.json` adapter through a standard HTTP/HTTPS proxy (SOCKS5 not supported). Both vars are no-ops with zero network-path change until set; see the "Sentiment pipeline internals" note below.
 
+**Phase 2 (news worker, no vars required):**
+- GDELT DOC 2.0, the curated games-press RSS feeds, and Google News RSS are all free and keyless — the news worker (`agents/workers/news/`) needs no new env vars. See the "News ingestion internals" note below.
+
 **Phase 3 (patch_notes worker, optional):**
 - `GAME_PATCH_PAGES` — optional JSON object mapping a watchlist game's exact `games.title` to one or more developer-blog/official patch-page URLs (string or list of strings), e.g. `{"Fortnite": ["https://www.fortnite.com/news/rss"]}`. Loaded defensively (missing/invalid → `{}`) by `agents/workers/patch_notes/blog_client.py`; most games won't have one configured. Same manually-curated-config convention as `STUDIO_ATS_BOARDS` (`agents/workers/studio_intel/ats_clients.py`).
 
@@ -118,11 +122,19 @@ Always lock the model per-agent in config; never default to the most capable.
 5. **All trade execution requires `status = 'approved'` in Supabase** — enforced inside the order-placement tool, with lifecycle hooks only as an additional mirror later
 
 ### Sentiment pipeline internals (`agents/workers/sentiment/`)
-The sentiment worker runs a two-pass pipeline per game:
+The sentiment worker runs a two-pass pipeline per game for community sources (Reddit/Steam/YouTube):
 - **VADER baseline** (`vader_scorer.py`) — deterministic rule-based polarity score over all texts, returns a 1–10 float
 - **ABSA** (`absa_client.py`) — Claude Haiku extracts aspect→polarity pairs (e.g. `monetization → negative`); skipped if fewer than 5 texts; top 3 aspects returned
 - **Preliminary lagged flag** (`divergence.py`) — optional hint against the latest stored player metrics; authoritative same-week divergence belongs in synthesis
 - **Reddit source** (`reddit_source.py`, `reddit_cache.py`) — an env-var-gated `FirstAvailableRedditSource` chain, tried in priority order: OAuth (`OAuthRedditSource`, plain `requests`, no `praw`) → HTTP/HTTPS proxy (`ProxiedJsonRedditSource`, a thin `JsonRedditSource` subclass) → the default unauthenticated public `.json` adapter (`JsonRedditSource`). Each leaf gets its own `api_cache` namespace (`reddit_oauth` / `reddit_proxy` / `reddit`) so one path's stale-serve can never mask another path's real health. Confirmed 2026-07-06: the default unauthenticated path now receives a static WAF `403` ("You've been blocked by network security") on every endpoint, every run, from GitHub Actions' datacenter IPs — an IP-reputation block, not throttling. OAuth and proxy are opt-in remediations gated behind `REDDIT_CLIENT_ID`/`REDDIT_CLIENT_SECRET`/`REDDIT_REFRESH_TOKEN`/`REDDIT_PROXY_URL` — neither is automatically active, and with none of those vars set the behavior is bit-for-bit identical to the original unauthenticated-only adapter. `build_subreddit_resolver()` mirrors the same priority chain (uncached leaves) for subreddit-name resolution, fixing a prior bug where resolution bypassed the fallback chain entirely.
+- **`source='news'` is a fourth, separate pipeline** (`news_stance_client.py`) — see "News ingestion internals" below. It reads `news_items` (written earlier in the run by `agents/workers/news/worker.py`) and runs one aggregate Claude stance/frame call per game per week; it does **not** go through VADER/ABSA/the vocal-minority weighting above, because media coverage measures a different axis (narrative framing) than community sentiment. `agents/synthesis/agent.py::_sentiment_by_game()` keeps `source='news'` out of `avg_score` for exactly this reason — see that section's docstring before changing the split.
+
+### News ingestion internals (`agents/workers/news/`)
+Standalone ingestion module (not a sentiment sub-pipeline) that fetches games-industry news, matches it to watchlist entities, and writes matched articles into a shared `news_items` table (migration `008_news_items.sql`) — a substrate the Sentiment worker consumes but doesn't fetch itself, so other workers (Studio Intel, a future Discovery agent) can read the same table later without cross-worker coupling. Runs before the Sentiment worker in `run_weekly.py` so this week's articles are available when Sentiment reads them. All three fetch sources are free and keyless (see `docs/data-source-risk-register.md`):
+- **GDELT DOC 2.0** (`gdelt_client.py`) — one query per watchlist entity (`"<title>"`), Tier-2 resilience posture (rate limiter, `api_cache` namespace `gdelt`, retry/backoff, `GdeltBlocked` → serve stale) despite being an official Tier-1-by-ToS API, since it has no SLA and is format-fragile.
+- **Curated games-press RSS** (`rss_client.py`) — a fixed list of outlet feeds (`CURATED_FEEDS`), pulled once per run regardless of watchlist size; a forked, minimal RSS/Atom parser (deliberately independent of `patch_notes/blog_client.py`'s — worker packages don't cross-import) extracts title/snippet/url/date/domain only, no full article bodies.
+- **Google News RSS** (`google_news_client.py`) — per-entity fallback, only queried for entities the first two sources found zero matches for this run ("thin coverage" backfill). Reuses `rss_client`'s feed parser (same-package import, not cross-package).
+- **Relevance matching** (`entity_matcher.py`) — Stage 1 is a free deterministic word-boundary match against each entity's `games.title`/`games.aliases` (strong) or studio name (weak, forces Stage 2). Stage 2 is a single cached Haiku yes/no disambiguation call, triggered only for studio-only matches or entities flagged `games.title_is_ambiguous` (seed this manually for common-word titles like Control/Destiny/Rust after applying migration 008) — verdicts are cached by `(article_url, entity_title)` in `api_cache` namespace `news_disambiguation` so a given article is judged once ever. Fails closed (excludes the match) on any error.
 
 ### Tracing internals (`agents/tracing.py`)
 `configure_tracing()` is called once at the very start of `run_weekly.py`'s pipeline run. Each worker/synthesis/crew call is wrapped via `traced_step(name)(callable)()` at the `run_weekly.py` call site — not via decorators inside each worker file, to avoid touching every worker module. The one real LLM call site (`agents/workers/sentiment/absa_client.py`) is instrumented via `langsmith.wrappers.wrap_anthropic`, which captures token usage automatically. Fully opt-in: everything no-ops with zero network calls when `LANGSMITH_API_KEY` is unset.
@@ -154,6 +166,7 @@ pip install -r requirements.txt
 # database/migrations/005_equity_signals.sql
 # database/migrations/006_patch_events_cadence_flags.sql
 # database/migrations/007_player_metrics_review_score_precision.sql
+# database/migrations/008_news_items.sql
 
 # Run the watchlist seeding agent (one-time, idempotent)
 python agents/orchestrator/seed_watchlist.py
