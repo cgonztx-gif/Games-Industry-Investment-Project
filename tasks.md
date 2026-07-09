@@ -223,6 +223,8 @@
 
 ## Reddit Alternate-Egress Remediation — 2026-07-06
 
+**Paused 2026-07-09 (deliberate scope decision):** deprioritized in favor of finishing the rest of the project first; revisit and pick Option A or B below later. Set `REDDIT_SOURCE_PAUSED=true` (`.env`, already set) so `build_reddit_source()`/`build_subreddit_resolver()` return a `NullRedditSource()` — zero network calls, sentiment/discovery workers degrade exactly like a real block, no code changes needed elsewhere. See `agents/workers/sentiment/reddit_source.py`'s module docstring and `CLAUDE.md`'s sentiment-internals note. To resume: unset `REDDIT_SOURCE_PAUSED` (or set to `false`) and pick up at the "User follow-up" subsection below.
+
 - [x] Confirm live diagnosis: Reddit's unauthenticated `.json` path returns a static `403` WAF block ("You've been blocked by network security") from GitHub Actions' datacenter IPs, on every endpoint tried, 100% of runs since inception — an IP-reputation block, not rate-limiting.
 - [x] Add `ProxiedJsonRedditSource` and `OAuthRedditSource` to `reddit_source.py`, gated behind `REDDIT_PROXY_URL` and `REDDIT_CLIENT_ID`+`REDDIT_CLIENT_SECRET`+`REDDIT_REFRESH_TOKEN` respectively; extract shared listing/comment/search parsers so both reuse `JsonRedditSource`'s parsing logic.
 - [x] Rewrite `build_reddit_source()` as an env-var-driven `FirstAvailableRedditSource` chain (OAuth → Proxy → unauthenticated, each with its own `api_cache` namespace); add `build_subreddit_resolver()` and use it in `worker.py`'s `_resolve_subreddit_for_game()` instead of a hardcoded `JsonRedditSource()`.

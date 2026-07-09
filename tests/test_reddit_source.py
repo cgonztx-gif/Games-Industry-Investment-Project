@@ -30,6 +30,7 @@ from agents.workers.sentiment.reddit_source import (
     CachedRedditSource,
     FirstAvailableRedditSource,
     JsonRedditSource,
+    NullRedditSource,
     OAuthRedditSource,
     ProxiedJsonRedditSource,
     RateLimiter,
@@ -45,6 +46,7 @@ _ENV_VARS = (
     "REDDIT_CLIENT_SECRET",
     "REDDIT_REFRESH_TOKEN",
     "REDDIT_PROXY_URL",
+    "REDDIT_SOURCE_PAUSED",
 )
 
 
@@ -637,3 +639,61 @@ def test_build_subreddit_resolver_all_vars_returns_three_element_uncached_chain(
     assert type(resolver.sources[0]) is OAuthRedditSource
     assert type(resolver.sources[1]) is ProxiedJsonRedditSource
     assert type(resolver.sources[2]) is JsonRedditSource
+
+
+# ---------------------------------------------------------------------------
+# REDDIT_SOURCE_PAUSED
+# ---------------------------------------------------------------------------
+
+def test_build_reddit_source_paused_returns_null_source_with_no_cache_calls(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("REDDIT_SOURCE_PAUSED", "true")
+    calls = []
+
+    def cache_factory(namespace):
+        calls.append(namespace)
+        return InMemoryRedditCache()
+
+    source = build_reddit_source(cache_factory)
+    assert type(source) is NullRedditSource
+    assert calls == []
+
+
+def test_build_subreddit_resolver_paused_returns_null_source(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("REDDIT_SOURCE_PAUSED", "1")
+    resolver = build_subreddit_resolver()
+    assert type(resolver) is NullRedditSource
+
+
+def test_paused_takes_priority_over_oauth_and_proxy_vars(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("REDDIT_CLIENT_ID", "cid")
+    monkeypatch.setenv("REDDIT_CLIENT_SECRET", "csecret")
+    monkeypatch.setenv("REDDIT_REFRESH_TOKEN", "rtoken")
+    monkeypatch.setenv("REDDIT_PROXY_URL", "http://proxy.example:8080")
+    monkeypatch.setenv("REDDIT_SOURCE_PAUSED", "yes")
+    source = build_reddit_source(lambda ns: InMemoryRedditCache())
+    assert type(source) is NullRedditSource
+
+
+def test_null_reddit_source_raises_blocked_with_no_network_on_every_method():
+    null_source = NullRedditSource()
+    for call in (
+        lambda: null_source.fetch_posts("gaming"),
+        lambda: null_source.fetch_comments("abc123", "gaming"),
+        lambda: null_source.resolve_subreddit("Some Game"),
+    ):
+        try:
+            call()
+            assert False, "expected RedditBlocked"
+        except RedditBlocked:
+            pass
+
+
+def test_reddit_source_paused_falsy_values_behave_like_unset(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("REDDIT_SOURCE_PAUSED", "false")
+    source = build_reddit_source(lambda ns: InMemoryRedditCache())
+    assert type(source) is CachedRedditSource
+    assert type(source.inner) is JsonRedditSource

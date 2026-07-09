@@ -31,6 +31,12 @@ Architecture (any of the 4 env vars set):
         CachedRedditSource(JsonRedditSource(), cache_factory("reddit")),        # always last
     ])
     build_subreddit_resolver() -> same priority order, uncached leaves
+
+Deliberate pause switch: REDDIT_SOURCE_PAUSED (any of "1"/"true"/"yes") makes
+both factories return NullRedditSource() instead -- zero network calls, every
+call raises RedditBlocked immediately. Added 2026-07-09 to stop paying for a
+guaranteed-failed request on every game/candidate every run while no real
+egress path (OAuth or proxy) is configured yet; unset it to resume once one is.
 """
 
 from __future__ import annotations
@@ -87,6 +93,30 @@ class RedditComment:
 class RedditBlocked(Exception):
     """Reddit throttled or blocked us (429/403/451, or retries exhausted).
     Signals callers to degrade gracefully instead of failing the run."""
+
+
+class NullRedditSource:
+    """Returned by build_reddit_source()/build_subreddit_resolver() when
+    REDDIT_SOURCE_PAUSED is set. Raises RedditBlocked immediately on every call,
+    with zero network I/O -- callers already treat RedditBlocked as a normal
+    degrade-gracefully signal, so pausing needs no changes in worker.py or
+    discovery/worker.py. Deliberate scope pause (2026-07-09): the unauthenticated
+    path is a confirmed-permanent WAF block and no proxy/OAuth egress is
+    configured yet, so every attempt was a guaranteed-failed request; this stops
+    paying that cost every run until a real egress path is set up."""
+
+    def fetch_posts(self, *args, **kwargs) -> list[RedditPost]:
+        raise RedditBlocked("Reddit source paused (REDDIT_SOURCE_PAUSED is set)")
+
+    def fetch_comments(self, *args, **kwargs) -> list[RedditComment]:
+        raise RedditBlocked("Reddit source paused (REDDIT_SOURCE_PAUSED is set)")
+
+    def resolve_subreddit(self, game_title: str) -> str | None:
+        raise RedditBlocked("Reddit source paused (REDDIT_SOURCE_PAUSED is set)")
+
+
+def _reddit_source_paused() -> bool:
+    return os.environ.get("REDDIT_SOURCE_PAUSED", "").strip().lower() in ("1", "true", "yes")
 
 
 # ---------------------------------------------------------------------------
@@ -576,7 +606,10 @@ def build_reddit_source(cache_factory: Callable[[str], RedditCache]) -> RedditSo
     """cache_factory: Callable[[str], RedditCache]. Returns a single CachedRedditSource
     when only JsonRedditSource is active (default -- identical object graph to before
     this change), else a FirstAvailableRedditSource of per-leaf CachedRedditSource wraps,
-    each with its own cache namespace."""
+    each with its own cache namespace. Returns NullRedditSource() instead, with no
+    leaves built at all, when REDDIT_SOURCE_PAUSED is set."""
+    if _reddit_source_paused():
+        return NullRedditSource()
     leaves = _build_leaf_sources()
     wrapped = [
         CachedRedditSource(leaf, cache_factory(_CACHE_NAMESPACE_BY_TYPE[type(leaf)]))
@@ -587,7 +620,11 @@ def build_reddit_source(cache_factory: Callable[[str], RedditCache]) -> RedditSo
 
 def build_subreddit_resolver() -> SubredditResolver:
     """Uncached resolver chain mirroring build_reddit_source's env-var priority --
-    resolution results are already cached separately by cached_resolve_subreddit()."""
+    resolution results are already cached separately by cached_resolve_subreddit().
+    Returns NullRedditSource() when REDDIT_SOURCE_PAUSED is set, same as
+    build_reddit_source()."""
+    if _reddit_source_paused():
+        return NullRedditSource()
     leaves = _build_leaf_sources()
     return leaves[0] if len(leaves) == 1 else FirstAvailableRedditSource(leaves)
 
