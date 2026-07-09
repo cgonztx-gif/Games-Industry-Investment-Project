@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from agents.http_retry import request_with_retry
 from database.api_cache import ApiCache
 
 logger = logging.getLogger("rss_client")
@@ -162,7 +163,7 @@ def _parse_feed(xml_text: str) -> list[dict]:
 
 def _fetch_feed_entries(url: str, limiter: RateLimiter, session: requests.Session) -> list[dict]:
     limiter.wait()
-    resp = session.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+    resp = request_with_retry(session.get, url, timeout=15, headers={"User-Agent": _USER_AGENT})
     resp.raise_for_status()
     return _parse_feed(resp.text)
 

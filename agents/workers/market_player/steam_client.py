@@ -5,6 +5,7 @@ import os
 import requests
 from typing import Optional
 
+from agents.http_retry import request_with_retry
 from database.api_cache import ApiCache
 
 STEAM_CHARTS_URL = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
@@ -30,7 +31,7 @@ class SteamReviewsBlocked(Exception):
 
 def _steam_get(url: str, params: dict | None = None) -> dict:
     time.sleep(0.5)
-    resp = requests.get(url, params=params or {}, timeout=30)
+    resp = request_with_retry(requests.get, url, params=params or {}, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -121,7 +122,8 @@ def get_live_service_candidates(min_ccu: int = 5000) -> list[dict]:
 
 def get_current_players(steam_app_id: str) -> int | None:
     """Current players via official Steam Web API."""
-    resp = requests.get(
+    resp = request_with_retry(
+        requests.get,
         STEAM_CURRENT_PLAYERS_URL,
         params={"appid": steam_app_id},
         timeout=15,
@@ -137,7 +139,8 @@ def get_current_players(steam_app_id: str) -> int | None:
 
 def _fetch_review_summary(steam_app_id: str) -> dict:
     time.sleep(_APPREVIEWS_DELAY)
-    resp = requests.get(
+    resp = request_with_retry(
+        requests.get,
         STEAM_REVIEWS_URL.format(app_id=steam_app_id),
         params={
             "json": "1",

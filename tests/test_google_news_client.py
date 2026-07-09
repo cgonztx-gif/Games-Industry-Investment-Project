@@ -40,6 +40,7 @@ class _FakeResponse:
     def __init__(self, status_code=200, text=_RSS_BODY):
         self.status_code = status_code
         self.text = text
+        self.headers: dict = {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -99,8 +100,12 @@ def test_search_parses_rss_feed():
     assert articles[0]["url"] == "https://example.com/story"
 
 
-def test_search_raises_on_http_error():
-    session = _FakeSession([_FakeResponse(status_code=429)])
+def test_search_raises_on_http_error(monkeypatch):
+    # 429 is retryable (agents.http_retry.request_with_retry) -- three scripted
+    # responses cover the default max_retries=3 before it gives up and returns
+    # the final (still-429) response for .raise_for_status() to raise on.
+    monkeypatch.setattr("agents.http_retry.time.sleep", lambda _: None)
+    session = _FakeSession([_FakeResponse(status_code=429)] * 3)
     source = GoogleNewsSource(limiter=_fast_limiter(), session=session)
 
     try:

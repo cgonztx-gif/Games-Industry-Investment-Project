@@ -9,6 +9,8 @@ from datetime import date, timedelta
 
 import requests
 
+from agents.http_retry import request_with_retry
+
 _HEADERS = {"User-Agent": "games-investment-platform cgonztx@gmail.com"}
 
 # Module-level cache — loaded once per process
@@ -38,7 +40,8 @@ def load_cik_map() -> dict[str, int]:
     if _cik_map:
         return _cik_map
 
-    resp = requests.get(
+    resp = request_with_retry(
+        requests.get,
         "https://www.sec.gov/files/company_tickers.json",
         headers=_HEADERS,
         timeout=15,
@@ -55,7 +58,7 @@ def get_recent_8k_filings(cik: int, days_back: int = 60) -> list[dict]:
     Each entry: {date, accession_number, items_raw, source_url}
     """
     url = f"https://data.sec.gov/submissions/CIK{cik:010d}.json"
-    resp = requests.get(url, headers=_HEADERS, timeout=15)
+    resp = request_with_retry(requests.get, url, headers=_HEADERS, timeout=15)
     resp.raise_for_status()
     data = resp.json()
 

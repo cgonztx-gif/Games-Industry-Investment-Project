@@ -19,8 +19,10 @@ import agents.workers.market_player.steam_client as steam_client
 
 
 class _FakeResp:
-    def __init__(self, body):
+    def __init__(self, body, status_code=200):
         self._body = body
+        self.status_code = status_code
+        self.headers: dict = {}
 
     def raise_for_status(self):
         pass
@@ -132,3 +134,35 @@ def test_get_top_ccu_games_filters_by_min_ccu_and_resolves_names(monkeypatch):
     assert results[0]["steam_app_id"] == "730"
     assert results[0]["title"] == "Counter-Strike 2"
     assert results[0]["ccu"] == 10000
+
+
+# ---------------------------------------------------------------------------
+# Transient-error retry (via agents.http_retry.request_with_retry)
+# ---------------------------------------------------------------------------
+
+def test_app_name_map_retries_transient_503_then_succeeds(monkeypatch):
+    responses = iter(
+        [
+            _FakeResp({}, status_code=503),
+            _app_list_page([{"appid": 570, "name": "Dota 2"}], have_more=False),
+        ]
+    )
+    monkeypatch.setattr(steam_client.requests, "get", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(steam_client.time, "sleep", lambda _: None)
+
+    names = steam_client._app_name_map()
+
+    assert names == {"570": "Dota 2"}
+
+
+def test_get_current_players_retries_transient_error_then_succeeds(monkeypatch):
+    responses = iter(
+        [
+            _FakeResp({}, status_code=503),
+            _FakeResp({"response": {"result": 1, "player_count": 12345}}),
+        ]
+    )
+    monkeypatch.setattr(steam_client.requests, "get", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(steam_client.time, "sleep", lambda _: None)
+
+    assert steam_client.get_current_players("570") == 12345

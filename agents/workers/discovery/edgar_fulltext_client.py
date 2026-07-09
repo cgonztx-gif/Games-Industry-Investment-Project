@@ -25,6 +25,8 @@ from datetime import date, timedelta
 
 import requests
 
+from agents.http_retry import request_with_retry
+
 _HEADERS = {"User-Agent": "games-investment-platform cgonztx@gmail.com"}
 _SEARCH_URL = "https://efts.sec.gov/LATEST/search-index"
 _REQUEST_DELAY = 0.15
@@ -49,7 +51,8 @@ class EdgarFulltextBlocked(Exception):
 
 def _search(query: str, forms: str, start_date: str, end_date: str) -> list[dict]:
     time.sleep(_REQUEST_DELAY)
-    resp = requests.get(
+    resp = request_with_retry(
+        requests.get,
         _SEARCH_URL,
         params={
             "q": query,

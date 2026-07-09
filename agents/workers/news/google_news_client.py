@@ -19,6 +19,7 @@ import logging
 
 import requests
 
+from agents.http_retry import request_with_retry
 from agents.workers.news.rss_client import RateLimiter, _parse_feed
 from database.api_cache import ApiCache
 
@@ -41,7 +42,8 @@ class GoogleNewsSource:
 
     def search(self, query: str) -> list[dict]:
         self.limiter.wait()
-        resp = self.session.get(
+        resp = request_with_retry(
+            self.session.get,
             _SEARCH_URL,
             params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"},
             timeout=15,

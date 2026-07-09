@@ -284,3 +284,37 @@ def test_cached_blog_source_raises_when_no_stale_cache(monkeypatch):
 def test_rate_limiter_first_call_does_not_block():
     limiter = blog_client.RateLimiter(min_interval=0.0, jitter=0.0)
     limiter.wait()  # should return immediately without raising
+
+
+# ---------------------------------------------------------------------------
+# _fetch_raw_entries: transient-error retry (agents.http_retry.request_with_retry)
+# ---------------------------------------------------------------------------
+
+class _FakeHttpResponse:
+    def __init__(self, status_code=200, text=RSS_FIXTURE, headers=None):
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise blog_client.requests.HTTPError(f"{self.status_code}")
+
+
+class _FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def get(self, *args, **kwargs):
+        return self.responses.pop(0)
+
+
+def test_fetch_raw_entries_retries_transient_503_then_succeeds(monkeypatch):
+    monkeypatch.setattr("agents.http_retry.time.sleep", lambda _: None)
+    session = _FakeSession([_FakeHttpResponse(status_code=503), _FakeHttpResponse()])
+    limiter = blog_client.RateLimiter(min_interval=0.0, jitter=0.0)
+
+    entries = blog_client._fetch_raw_entries("https://example.com/feed", limiter, session)
+
+    assert len(entries) == 3
+    assert entries[0]["title"] == "Hotfix 1.2.3 - Weapon Balance"

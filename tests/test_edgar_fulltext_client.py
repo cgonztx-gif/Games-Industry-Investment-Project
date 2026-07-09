@@ -19,10 +19,11 @@ from agents.workers.discovery.edgar_fulltext_client import search_new_gaming_fil
 
 
 class _FakeResp:
-    def __init__(self, status_code=200, body=None, json_error=False):
+    def __init__(self, status_code=200, body=None, json_error=False, headers=None):
         self.status_code = status_code
         self._body = body or {"hits": {"hits": []}}
         self._json_error = json_error
+        self.headers = headers or {}
 
     def json(self):
         if self._json_error:
@@ -186,6 +187,25 @@ def test_non_200_returns_empty_list(monkeypatch):
     results = search_new_gaming_filings(known_tickers=set())
 
     assert results == []
+
+
+def test_transient_503_retried_then_succeeds(monkeypatch):
+    # 503 is retryable (agents.http_retry.request_with_retry) -- confirms _search
+    # recovers from a transient blip instead of treating it like a permanent block.
+    responses = iter([
+        _FakeResp(status_code=503),
+        _resp_with_hits([_hit("GameStart Inc.  (GSTR)  (CIK 0001234567)")]),
+        _resp_with_hits([]),
+        _resp_with_hits([]),
+        _resp_with_hits([]),
+    ])
+    monkeypatch.setattr(edgar_mod.requests, "get", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(edgar_mod.time, "sleep", lambda _: None)
+
+    results = search_new_gaming_filings(known_tickers=set())
+
+    assert len(results) == 1
+    assert results[0]["ticker"] == "GSTR"
 
 
 # ---------------------------------------------------------------------------

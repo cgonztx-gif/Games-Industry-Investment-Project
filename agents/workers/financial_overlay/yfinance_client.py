@@ -8,11 +8,12 @@ from datetime import date, timedelta
 
 import yfinance as yf
 
+from agents.http_retry import retry_call
 from database.api_cache import ApiCache
 
 
 def _fetch_equity_snapshot(ticker: str) -> dict:
-    info = yf.Ticker(ticker).info
+    info = retry_call(lambda: yf.Ticker(ticker).info)
 
     price = info.get("currentPrice") or info.get("previousClose")
 
@@ -88,7 +89,7 @@ def get_historical_close(
         target = date.fromisoformat(on_date)
         start = (target - timedelta(days=7)).isoformat()
         end = (target + timedelta(days=1)).isoformat()
-        hist = yf.Ticker(ticker).history(start=start, end=end)
+        hist = retry_call(lambda: yf.Ticker(ticker).history(start=start, end=end))
         if hist is None or hist.empty:
             return None
         close = float(hist["Close"].iloc[-1])

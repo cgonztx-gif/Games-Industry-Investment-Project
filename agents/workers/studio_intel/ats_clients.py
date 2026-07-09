@@ -7,6 +7,8 @@ import time
 
 import requests
 
+from agents.http_retry import request_with_retry
+
 _REQUEST_DELAY = 0.25
 
 
@@ -31,7 +33,7 @@ def load_ats_board_map() -> dict[str, dict]:
 
 def _get_json(url: str, params: dict | None = None) -> dict | list:
     time.sleep(_REQUEST_DELAY)
-    resp = requests.get(url, params=params or {}, timeout=20)
+    resp = request_with_retry(requests.get, url, params=params or {}, timeout=20)
     resp.raise_for_status()
     return resp.json()
 

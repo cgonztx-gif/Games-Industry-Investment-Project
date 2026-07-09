@@ -159,3 +159,37 @@ def test_fetch_curated_feeds_degrades_per_feed():
         "https://good.example.com/feed/article",
         "https://good2.example.com/feed/article",
     }
+
+
+# ---------------------------------------------------------------------------
+# _fetch_feed_entries: transient-error retry (agents.http_retry.request_with_retry)
+# ---------------------------------------------------------------------------
+
+class _FakeHttpResponse:
+    def __init__(self, status_code=200, text=RSS_FIXTURE, headers=None):
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise rss_client.requests.HTTPError(f"{self.status_code}")
+
+
+class _FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def get(self, *args, **kwargs):
+        return self.responses.pop(0)
+
+
+def test_fetch_feed_entries_retries_transient_503_then_succeeds(monkeypatch):
+    monkeypatch.setattr("agents.http_retry.time.sleep", lambda _: None)
+    session = _FakeSession([_FakeHttpResponse(status_code=503), _FakeHttpResponse()])
+    limiter = rss_client.RateLimiter(min_interval=0.0, jitter=0.0)
+
+    entries = rss_client._fetch_feed_entries("https://example.com/feed", limiter, session)
+
+    assert len(entries) == 1
+    assert entries[0]["title"] == "Studio ships big patch"

@@ -30,6 +30,7 @@ from email.utils import parsedate_to_datetime
 
 import requests
 
+from agents.http_retry import request_with_retry
 from agents.workers.patch_notes.steam_news_client import (
     _clean_html,
     classify_patch,
@@ -215,7 +216,7 @@ def _fetch_raw_entries(
     session: requests.Session,
 ) -> list[dict]:
     limiter.wait()
-    resp = session.get(url, timeout=15, headers={"User-Agent": _USER_AGENT})
+    resp = request_with_retry(session.get, url, timeout=15, headers={"User-Agent": _USER_AGENT})
     resp.raise_for_status()
     text = resp.text
     if _looks_like_feed(resp.headers.get("Content-Type", ""), text):

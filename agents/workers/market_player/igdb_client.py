@@ -3,6 +3,8 @@ import requests
 from datetime import datetime, timedelta
 from typing import Optional
 
+from agents.http_retry import request_with_retry
+
 IGDB_BASE = "https://api.igdb.com/v4"
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 
@@ -26,7 +28,8 @@ _UPCOMING_FIELDS = (
 
 
 def get_access_token(client_id: str, client_secret: str) -> str:
-    resp = requests.post(
+    resp = request_with_retry(
+        requests.post,
         TWITCH_TOKEN_URL,
         params={
             "client_id": client_id,
@@ -41,7 +44,8 @@ def get_access_token(client_id: str, client_secret: str) -> str:
 
 def _post(endpoint: str, body: str, client_id: str, token: str) -> list[dict]:
     time.sleep(0.26)  # stay under 4 req/sec IGDB rate limit
-    resp = requests.post(
+    resp = request_with_retry(
+        requests.post,
         f"{IGDB_BASE}/{endpoint}",
         headers={
             "Client-ID": client_id,

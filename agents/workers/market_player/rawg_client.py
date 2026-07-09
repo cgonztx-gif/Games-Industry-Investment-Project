@@ -4,6 +4,8 @@ import requests
 from difflib import SequenceMatcher
 from typing import Optional
 
+from agents.http_retry import request_with_retry
+
 RAWG_BASE = "https://api.rawg.io/api"
 MATCH_SCORE_THRESHOLD = 0.72
 SUBTITLE_SCORE_THRESHOLD = 0.58
@@ -45,7 +47,7 @@ def search_game(api_key: str, title: str, year: Optional[int] = None) -> Optiona
         params["dates"] = f"{year - 1}-01-01,{year + 1}-12-31"
 
     try:
-        resp = requests.get(f"{RAWG_BASE}/games", params=params, timeout=15)
+        resp = request_with_retry(requests.get, f"{RAWG_BASE}/games", params=params, timeout=15)
         resp.raise_for_status()
         results = resp.json().get("results", [])
     except Exception:
@@ -81,7 +83,8 @@ def get_steam_app_id(api_key: str, rawg_slug: str) -> Optional[str]:
     """
     time.sleep(3.0)
     try:
-        resp = requests.get(
+        resp = request_with_retry(
+            requests.get,
             f"{RAWG_BASE}/games/{rawg_slug}/stores",
             params={"key": api_key},
             timeout=15,
