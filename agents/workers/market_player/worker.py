@@ -11,7 +11,7 @@ Returns a structured summary dict consumed by the orchestrator.
 import os
 from datetime import date
 
-from agents.workers.market_player.steam_client import get_app_metrics
+from agents.workers.market_player.steam_client import get_app_metrics, get_peak_players_24h_map
 from database.api_cache import SupabaseApiCache
 from database.db_client import (
     get_client,
@@ -31,6 +31,12 @@ def run() -> dict:
     skipped = len(all_games) - len(steam_games)
 
     print(f"[market_player] {len(steam_games)} games with Steam IDs | {skipped} skipped (no Steam ID)")
+
+    try:
+        peak_map = get_peak_players_24h_map()
+    except Exception:
+        peak_map = {}
+    print(f"[market_player] {len(peak_map)} games matched to the official 24h-peak chart")
 
     processed: list[dict] = []
     errors: list[dict] = []
@@ -52,7 +58,7 @@ def run() -> dict:
                 "game_id": game_id,
                 "date": today,
                 "concurrent_players": metrics.get("ccu"),
-                "peak_players_24h": None,
+                "peak_players_24h": peak_map.get(str(steam_id)),
                 "review_score": metrics.get("review_score"),
                 "review_count": metrics.get("review_count"),
                 "review_velocity": velocity,

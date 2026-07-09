@@ -14,6 +14,8 @@ import re
 
 import anthropic
 
+from agents.token_tracking import record_usage_from_message
+
 _MODEL = "claude-sonnet-4-6"
 _client = anthropic.Anthropic()
 
@@ -72,6 +74,7 @@ def run_deep_dive(game_title: str, question: str, client=None) -> dict | None:
             messages=[{"role": "user", "content": prompt}],
         )
 
+        record_usage_from_message(_MODEL, msg)
         if msg.stop_reason == "refusal":
             return None
 

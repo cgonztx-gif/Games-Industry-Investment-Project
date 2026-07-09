@@ -136,6 +136,44 @@ def test_get_top_ccu_games_filters_by_min_ccu_and_resolves_names(monkeypatch):
     assert results[0]["ccu"] == 10000
 
 
+def test_get_peak_players_24h_map_keys_by_appid(monkeypatch):
+    responses = iter(
+        [
+            _charts_resp(
+                [
+                    {"appid": 730, "peak_in_game": 1275982},
+                    {"appid": 570, "peak_in_game": 635321},
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(steam_client.requests, "get", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(steam_client.time, "sleep", lambda _: None)
+
+    peak_map = steam_client.get_peak_players_24h_map()
+
+    assert peak_map == {"730": 1275982, "570": 635321}
+
+
+def test_get_peak_players_24h_map_skips_rows_missing_peak(monkeypatch):
+    responses = iter(
+        [
+            _charts_resp(
+                [
+                    {"appid": 730, "peak_in_game": 1275982},
+                    {"appid": 999},
+                ]
+            ),
+        ]
+    )
+    monkeypatch.setattr(steam_client.requests, "get", lambda *a, **kw: next(responses))
+    monkeypatch.setattr(steam_client.time, "sleep", lambda _: None)
+
+    peak_map = steam_client.get_peak_players_24h_map()
+
+    assert peak_map == {"730": 1275982}
+
+
 # ---------------------------------------------------------------------------
 # Transient-error retry (via agents.http_retry.request_with_retry)
 # ---------------------------------------------------------------------------

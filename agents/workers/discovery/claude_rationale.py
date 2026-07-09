@@ -9,6 +9,8 @@ only used for this text, never for the score.
 import anthropic
 from langsmith.wrappers import wrap_anthropic
 
+from agents.token_tracking import record_usage_from_message
+
 _MODEL = "claude-haiku-4-5-20251001"
 _client = wrap_anthropic(anthropic.Anthropic())
 
@@ -52,6 +54,7 @@ def _call(prompt: str) -> str:
             system=_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
+        record_usage_from_message(_MODEL, msg)
         text = msg.content[0].text.strip()
         return text or _FALLBACK
     except Exception:

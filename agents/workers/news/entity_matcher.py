@@ -22,6 +22,7 @@ import re
 import anthropic
 from langsmith.wrappers import wrap_anthropic
 
+from agents.token_tracking import record_usage_from_message
 from database.api_cache import ApiCache
 
 _MODEL = "claude-haiku-4-5-20251001"
@@ -81,6 +82,7 @@ def disambiguate(article: dict, entity_title: str, cache: ApiCache) -> bool:
             max_tokens=8,
             messages=[{"role": "user", "content": prompt}],
         )
+        record_usage_from_message(_MODEL, msg)
         raw = msg.content[0].text.strip().lower()
         verdict = raw.startswith("yes")
         cache.set(key, {"verdict": verdict})

@@ -29,6 +29,8 @@ jobs:
           STEAM_API_KEY:        ${{ secrets.STEAM_API_KEY }}
           LANGSMITH_API_KEY:    ${{ secrets.LANGSMITH_API_KEY }}
           LANGSMITH_PROJECT:    ${{ secrets.LANGSMITH_PROJECT }}
+          YOUTUBE_API_KEY:      ${{ secrets.YOUTUBE_API_KEY }}
+          YOUTUBE_UPLOAD_PLAYLISTS: ${{ secrets.YOUTUBE_UPLOAD_PLAYLISTS }}
           RESEND_API_KEY:       ${{ secrets.RESEND_API_KEY }}
           BRIEFING_EMAIL_TO:    ${{ secrets.BRIEFING_EMAIL_TO }}
           BRIEFING_EMAIL_FROM:  ${{ secrets.BRIEFING_EMAIL_FROM }}

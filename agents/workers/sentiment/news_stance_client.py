@@ -16,6 +16,8 @@ import re
 import anthropic
 from langsmith.wrappers import wrap_anthropic
 
+from agents.token_tracking import record_usage_from_message
+
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
 _SONNET_MODEL = "claude-sonnet-4-6"
 _client = wrap_anthropic(anthropic.Anthropic())
@@ -73,13 +75,15 @@ def classify_stance(
     )
     prompt = _USER_TEMPLATE.format(game_title=game_title, articles_block=articles_block)
 
+    model = _model_for_tier(sentiment_tier)
     try:
         msg = _client.messages.create(
-            model=_model_for_tier(sentiment_tier),
+            model=model,
             max_tokens=512,
             system=_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
         )
+        record_usage_from_message(model, msg)
         raw = msg.content[0].text.strip()
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*\n?", "", raw)

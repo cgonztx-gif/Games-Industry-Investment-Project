@@ -120,6 +120,28 @@ def get_live_service_candidates(min_ccu: int = 5000) -> list[dict]:
     return list(results.values())
 
 
+def get_peak_players_24h_map() -> dict[str, int]:
+    """
+    Official 24h-peak concurrent players, keyed by Steam app ID.
+
+    Sourced from the same GetMostPlayedGames chart used by get_top_ccu_games /
+    get_live_service_candidates (`peak_in_game` is the field backing Steam's
+    public "24-Hour Peak" stats page). This chart only covers the top ~100
+    games by peak concurrent players -- Valve does not expose a per-arbitrary-
+    app-id 24h-peak endpoint -- so this map only ever has ~100 entries. Every
+    other watchlist game's peak_players_24h stays None rather than being
+    approximated from weekly-sampled CCU history, which would be a
+    weekly-sample max mislabeled as a true 24h peak.
+    """
+    peak_map: dict[str, int] = {}
+    for row in _most_played_rows():
+        appid = str(row.get("appid") or "")
+        peak = row.get("peak_in_game")
+        if appid and peak is not None:
+            peak_map[appid] = int(peak)
+    return peak_map
+
+
 def get_current_players(steam_app_id: str) -> int | None:
     """Current players via official Steam Web API."""
     resp = request_with_retry(

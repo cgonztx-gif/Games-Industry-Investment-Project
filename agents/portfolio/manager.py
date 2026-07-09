@@ -62,6 +62,7 @@ from agents.portfolio.alpaca_mcp import (
     build_readonly_account_server,
 )
 from agents.portfolio.alpaca_trading_client import get_account_state
+from agents.token_tracking import record_usage
 from database.db_client import (
     get_client,
     get_latest_weekly_briefing,
@@ -181,6 +182,8 @@ async def _default_run_agent_async(
                 if isinstance(block, TextBlock):
                     text_parts.append(block.text)
         elif isinstance(message, ResultMessage):
+            usage = message.usage or {}
+            record_usage(model, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
             if message.is_error:
                 return None
             result_text = message.result
