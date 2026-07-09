@@ -8,7 +8,12 @@ from typing import Optional
 from database.api_cache import ApiCache
 
 STEAM_CHARTS_URL = "https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/"
-STEAM_APP_LIST_URL = "https://api.steampowered.com/ISteamApps/GetAppList/v2/"
+# ISteamApps/GetAppList/v2 was removed by Valve (confirmed live 2026-07-09: 404,
+# body "Method 'GetAppList' not found in interface 'ISteamApps'"). IStoreService/
+# GetAppList/v1 is the current replacement -- it requires STEAM_API_KEY and pages
+# results via last_appid/have_more_results rather than returning everything at once.
+STEAM_APP_LIST_URL = "https://api.steampowered.com/IStoreService/GetAppList/v1/"
+_APP_LIST_PAGE_SIZE = 50000
 STEAM_CURRENT_PLAYERS_URL = (
     "https://api.steampowered.com/ISteamUserStats/"
     "GetNumberOfCurrentPlayers/v1/"
@@ -36,9 +41,21 @@ def _steam_api_key_params() -> dict:
 
 
 def _app_name_map() -> dict[str, str]:
-    data = _steam_get(STEAM_APP_LIST_URL)
-    apps = (data.get("applist") or {}).get("apps") or []
-    return {str(app.get("appid")): app.get("name", "") for app in apps}
+    names: dict[str, str] = {}
+    last_appid = 0
+    while True:
+        params = {**_steam_api_key_params(), "max_results": _APP_LIST_PAGE_SIZE}
+        if last_appid:
+            params["last_appid"] = last_appid
+        data = _steam_get(STEAM_APP_LIST_URL, params=params)
+        response = data.get("response") or {}
+        apps = response.get("apps") or []
+        for app in apps:
+            names[str(app.get("appid"))] = app.get("name", "")
+        if not apps or not response.get("have_more_results"):
+            break
+        last_appid = response.get("last_appid")
+    return names
 
 
 def _most_played_rows() -> list[dict]:
