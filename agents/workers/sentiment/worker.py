@@ -43,7 +43,10 @@ from agents.workers.sentiment.reddit_source import (
 )
 from agents.workers.sentiment.steam_reviews_client import fetch_steam_reviews
 from agents.workers.sentiment.vader_scorer import score_texts
-from agents.workers.sentiment.youtube_client import fetch_youtube_comments
+from agents.workers.sentiment.youtube_client import (
+    fetch_youtube_comments,
+    load_game_youtube_playlists,
+)
 
 _NEWS_LOOKBACK_DAYS = 7
 
@@ -176,6 +179,7 @@ def run() -> dict:
     lookup_cache = SupabaseRedditCache(client=db, source="subreddit_lookup")
     steam_cache = SupabaseApiCache(client=db, source="steam_review_text")
     youtube_cache = SupabaseApiCache(client=db, source="youtube_comments")
+    game_youtube_playlists = load_game_youtube_playlists()
     subreddit_resolver = build_subreddit_resolver()
     reddit_source = build_reddit_source(lambda source: SupabaseRedditCache(client=db, source=source))
 
@@ -242,7 +246,11 @@ def run() -> dict:
                     first_reddit_block_reason = str(exc)
                     print(f"[sentiment] Reddit blocked (first occurrence): {exc}")
 
-            youtube_comments = fetch_youtube_comments(title, cache=youtube_cache)
+            youtube_comments = fetch_youtube_comments(
+                title,
+                cache=youtube_cache,
+                game_playlist_ids=game_youtube_playlists.get(title),
+            )
             wrote_any = _write_source_snapshot(
                 db,
                 game_id=game_id,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -22,6 +23,50 @@ def _normalize(text: str) -> str:
 def _playlist_ids() -> list[str]:
     raw = os.environ.get("YOUTUBE_UPLOAD_PLAYLISTS", "")
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def load_game_youtube_playlists() -> dict[str, list[str]]:
+    """
+    Load optional manually-curated per-game/per-studio creator upload-playlist
+    IDs -- same defensive JSON-env convention as
+    patch_notes/blog_client.py::load_game_patch_pages() and
+    studio_intel/ats_clients.py::load_ats_board_map().
+
+    Expected env shape:
+      GAME_YOUTUBE_PLAYLISTS='{"Fortnite": ["UUabc123..."],
+                                "Apex Legends": "UUdef456..."}'
+
+    Keyed by exact watchlist game title (games.title). Values may be a single
+    playlist ID string or a list of IDs. Missing/invalid env value returns {}
+    (no games have one configured by default -- this is a curated allowlist,
+    not a discovery mechanism, to avoid the quota-expensive search.list
+    endpoint). Each ID must be a channel's "uploads" playlist ID (the same
+    shape YOUTUBE_UPLOAD_PLAYLISTS already expects), not a raw channel ID or
+    video ID.
+
+    Unlike the global YOUTUBE_UPLOAD_PLAYLISTS list -- which is filtered by a
+    title/description substring match in _candidate_videos() because a single
+    outlet channel covers many unrelated games -- videos from a per-game
+    playlist configured here are trusted as already game-scoped and are not
+    re-filtered by title (see _trusted_candidate_videos()).
+    """
+    raw = os.environ.get("GAME_YOUTUBE_PLAYLISTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    result: dict[str, list[str]] = {}
+    for title, playlist_ids in data.items():
+        if isinstance(playlist_ids, str):
+            result[title] = [playlist_ids] if playlist_ids.strip() else []
+        elif isinstance(playlist_ids, list):
+            result[title] = [p for p in playlist_ids if isinstance(p, str) and p.strip()]
+    return result
 
 
 def _get(url: str, params: dict) -> dict:
@@ -54,6 +99,33 @@ def _candidate_videos(api_key: str, game_title: str, playlist_ids: Iterable[str]
                 if video_id and video_id not in video_ids:
                     video_ids.append(video_id)
 
+    return video_ids
+
+
+def _trusted_candidate_videos(
+    api_key: str, playlist_ids: Iterable[str], per_playlist_limit: int
+) -> list[str]:
+    """
+    Like _candidate_videos() but for manually-curated, already-game-scoped
+    playlists (load_game_youtube_playlists()) -- returns each playlist's most
+    recent uploads directly, with no title/description filtering, since the
+    curation itself is the relevance signal.
+    """
+    video_ids: list[str] = []
+    for playlist_id in playlist_ids:
+        data = _get(
+            f"{_YOUTUBE_API}/playlistItems",
+            {
+                "key": api_key,
+                "part": "contentDetails",
+                "playlistId": playlist_id,
+                "maxResults": min(per_playlist_limit, 50),
+            },
+        )
+        for item in data.get("items", []):
+            video_id = (item.get("contentDetails") or {}).get("videoId")
+            if video_id and video_id not in video_ids:
+                video_ids.append(video_id)
     return video_ids
 
 
@@ -98,17 +170,27 @@ def fetch_youtube_comments(
     max_videos: int = 2,
     comments_per_video: int = 50,
     ttl_hours: int = 24,
+    game_playlist_ids: Iterable[str] | None = None,
 ) -> list[dict]:
     """
     Fetch YouTube comments using official Data API calls only.
 
-    Video discovery is intentionally limited to configured upload playlists via
-    playlistItems.list. This avoids the quota-expensive search.list endpoint.
-    Set YOUTUBE_API_KEY and comma-separated YOUTUBE_UPLOAD_PLAYLISTS to enable.
+    Video discovery combines two sources, both via playlistItems.list only --
+    this avoids the quota-expensive search.list endpoint entirely:
+      1. The shared global outlet playlists (YOUTUBE_UPLOAD_PLAYLISTS), title/
+         description-filtered against game_title since one outlet channel
+         covers many games (_candidate_videos()).
+      2. Optional per-game/per-studio creator playlists passed in via
+         game_playlist_ids (sourced from GAME_YOUTUBE_PLAYLISTS by the
+         caller, keyed by game_title) -- trusted as already game-scoped and
+         used unfiltered (_trusted_candidate_videos()).
+    Set YOUTUBE_API_KEY plus at least one of YOUTUBE_UPLOAD_PLAYLISTS /
+    game_playlist_ids to enable.
     """
     api_key = os.environ.get("YOUTUBE_API_KEY")
-    playlists = _playlist_ids()
-    if not api_key or not playlists:
+    global_playlists = _playlist_ids()
+    game_playlists = [p for p in (game_playlist_ids or []) if p]
+    if not api_key or not (global_playlists or game_playlists):
         return []
 
     cache_key = f"comments:{_normalize(game_title)}"
@@ -118,7 +200,15 @@ def fetch_youtube_comments(
             return fresh
 
     try:
-        video_ids = _candidate_videos(api_key, game_title, playlists)[:max_videos]
+        video_ids: list[str] = []
+        if global_playlists:
+            video_ids.extend(_candidate_videos(api_key, game_title, global_playlists))
+        if game_playlists:
+            for video_id in _trusted_candidate_videos(api_key, game_playlists, max_videos):
+                if video_id not in video_ids:
+                    video_ids.append(video_id)
+        video_ids = video_ids[:max_videos]
+
         comments: list[dict] = []
         for video_id in video_ids:
             comments.extend(_comments_for_video(api_key, video_id, comments_per_video))

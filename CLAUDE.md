@@ -82,6 +82,7 @@ Copy `.env.example` to `.env`. Required per phase:
 **Phase 2 (sentiment worker):**
 - No Reddit OAuth credentials are required by default. Reddit collection uses public read-only `.json` endpoints through `agents/workers/sentiment/reddit_source.py` and `api_cache`.
 - `YOUTUBE_API_KEY` is required once the YouTube Data API comment collector is enabled.
+- `GAME_YOUTUBE_PLAYLISTS` (optional) — JSON object mapping a watchlist game's exact `games.title` to one or more per-game/per-studio creator upload-playlist IDs, e.g. `{"Fortnite": ["UUabc123..."]}`. Same manually-curated-config convention as `GAME_PATCH_PAGES`/`STUDIO_ATS_BOARDS`; no games configured by default. Covers dedicated community/creator channels the shared `YOUTUBE_UPLOAD_PLAYLISTS` outlet list misses — see `youtube_client.py`'s docstring for how it's merged (unfiltered, unlike the title-filtered global list).
 - `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN` (optional, all three required together) — activates `OAuthRedditSource`, an alternate egress for when the default unauthenticated path is IP-blocked. Requires completing Reddit's manual, non-guaranteed OAuth app-approval process (no SLA as of the Nov 2025 policy).
 - `REDDIT_PROXY_URL` (optional) — activates `ProxiedJsonRedditSource`, routing the default `.json` adapter through a standard HTTP/HTTPS proxy (SOCKS5 not supported). Both vars are no-ops with zero network-path change until set; see the "Sentiment pipeline internals" note below.
 
