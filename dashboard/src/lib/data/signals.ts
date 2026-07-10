@@ -1,4 +1,5 @@
 import { createAnonClient } from "@/lib/supabase/client"
+import { fetchAllRows } from "@/lib/supabase/paginate"
 
 // Recent-window bound for all three signal tables, so this page never scans
 // full table history -- matches health_score.py's per-component lookback
@@ -6,13 +7,6 @@ import { createAnonClient } from "@/lib/supabase/client"
 const WINDOW_DAYS = 90
 const CCU_HISTORY_LIMIT = 15
 const GAME_FETCH_CHUNK_SIZE = 150
-// PostgREST enforces its own server-side max-rows cap (confirmed live: a
-// `.limit(5000)` request against the ~1854-row player_metrics table still
-// came back truncated at 1000, silently) -- a single unpaginated request
-// can't be trusted to return every row in a bounded window, so every
-// multi-row fetch on this page paginates via fetchAllRows() instead of
-// relying on `.limit()`.
-const FETCH_PAGE_SIZE = 1000
 
 export type PlayerMetricPoint = {
   date: string
@@ -109,24 +103,6 @@ function groupByGameId<T extends { game_id: string | null }>(rows: T[]): Map<str
     }
   }
   return grouped
-}
-
-// Generic pager around PostgREST's server-enforced max-rows cap: keeps
-// requesting `.range(from, to)` pages until a short page confirms the end,
-// rather than trusting a single `.limit()` call to return everything.
-async function fetchAllRows<T>(
-  fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>
-): Promise<T[]> {
-  const rows: T[] = []
-  let offset = 0
-  for (;;) {
-    const { data, error } = await fetchPage(offset, offset + FETCH_PAGE_SIZE - 1)
-    if (error) throw new Error(error.message)
-    rows.push(...(data ?? []))
-    if (!data || data.length < FETCH_PAGE_SIZE) break
-    offset += FETCH_PAGE_SIZE
-  }
-  return rows
 }
 
 // Scopes every signal table to active games -- same scoping every worker uses.

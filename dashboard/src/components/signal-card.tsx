@@ -1,4 +1,5 @@
-import { ExternalLinkIcon } from "lucide-react"
+import Link from "next/link"
+import { ExternalLinkIcon, LineChartIcon } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import {
@@ -143,17 +144,26 @@ export function SignalCard({ card }: { card: SignalCardData }) {
           )}
         </div>
 
-        {link && (
-          <a
-            href={link.href}
-            target="_blank"
-            rel="noopener noreferrer"
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <Link
+            href={`/signals/${card.game_id}`}
             className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
           >
-            {link.label}
-            <ExternalLinkIcon className="size-3.5" />
-          </a>
-        )}
+            View sentiment trend
+            <LineChartIcon className="size-3.5" />
+          </Link>
+          {link && (
+            <a
+              href={link.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+            >
+              {link.label}
+              <ExternalLinkIcon className="size-3.5" />
+            </a>
+          )}
+        </div>
       </CardContent>
     </Card>
   )

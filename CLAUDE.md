@@ -47,7 +47,7 @@ database/
   schema.sql          Supabase table definitions
   migrations/         Incremental schema changes (apply in Supabase SQL Editor)
 scripts/              One-off maintenance scripts (rawg_backfill.py, etc.)
-dashboard/            Next.js frontend (scaffolded in Phase 7)
+dashboard/            Next.js 16 frontend (Phase 7, in progress) — Portfolio Overview, Watchlist Proposals, Game Signals + sentiment trend detail pages built so far
 docs/                 Planning and design documents
 .github/workflows/    GitHub Actions cron pipelines
 ```
@@ -63,7 +63,7 @@ docs/                 Planning and design documents
 | 4 | Synthesis Agent & Briefing | Partially built |
 | 5 | Portfolio Manager + Alpaca Execution | Partially built |
 | 6 | Discovery Agent | Built (not yet run live) |
-| 7 | Dashboard Polish | Planned |
+| 7 | Dashboard Polish | **In progress** |
 
 See `tasks.md` for per-phase checklists and current status.
 
@@ -121,7 +121,7 @@ Always lock the model per-agent in config; never default to the most capable.
 3. **Subagents are strictly two levels deep** — orchestrator → workers; workers cannot spawn subagents (SDK constraint)
 4. **Execution subagent has Alpaca tools only** — tool restriction is the primary safety guardrail
 5. **All trade execution requires `status = 'approved'` in Supabase** — enforced inside the order-placement tool, with lifecycle hooks only as an additional mirror later
-6. **Schema changes always go through `database/migrations/`** — `database/schema.sql` is the original baseline only; never edit it for a post-setup change. Add a new numbered `database/migrations/NNN_description.sql` file instead (see the existing `001`-`010` files for the pattern), append it to the "Apply pending migrations" list below, and apply it via the Supabase SQL Editor. Keeps `schema.sql` a truthful historical snapshot and gives every change an explicit, individually-applicable, auditable step.
+6. **Schema changes always go through `database/migrations/`** — `database/schema.sql` is the original baseline only; never edit it for a post-setup change. Add a new numbered `database/migrations/NNN_description.sql` file instead (see the existing `001`-`013` files for the pattern), append it to the "Apply pending migrations" list below, and apply it via the Supabase SQL Editor. Keeps `schema.sql` a truthful historical snapshot and gives every change an explicit, individually-applicable, auditable step.
 
 ### Sentiment pipeline internals (`agents/workers/sentiment/`)
 The sentiment worker runs a two-pass pipeline per game for community sources (Reddit/Steam/YouTube):
@@ -171,6 +171,15 @@ Scans four sources for watchlist candidates not yet tracked and writes `watchlis
 ### External data caching design
 `docs/supabase_reddit_cache.md` specifies a generic `api_cache` table (`source TEXT, key TEXT, payload JSONB, fetched_at TIMESTAMPTZ`) that backs Tier-2 source adapters. The table schema and TTL semantics are documented there; apply migrations before running volatile-source collectors.
 
+### Dashboard internals (`dashboard/`)
+Next.js 16 (App Router, TypeScript, Tailwind v4, Turbopack), scaffolded via `create-next-app` + `npx shadcn@latest init` rather than cloning the community "Shadcn Admin" starter the original brief named — that repo is Vite + React Router, not Next.js, so its own `sidebar-07` block plus `next-themes` stand in for it instead. Pages built so far: Portfolio Overview (`src/app/page.tsx`), the Watchlist Proposals approve/reject queue (`src/app/watchlist-proposals/`, the one write path), and Game Signals (`src/app/signals/`, per-game cards plus a `[gameId]` sentiment trend detail route). `dashboard/AGENTS.md` (bundled by create-next-app) flags that this Next.js version has training-data-diverging breaking changes — read the relevant guide under `node_modules/next/dist/docs/` before touching data-fetching or mutation code.
+- **Read/write Supabase key separation is load-bearing, not a style preference.** `src/lib/supabase/client.ts` (`createAnonClient()`, anon key, `NEXT_PUBLIC_*`) is the only client any Server/Client Component may use to read. `src/lib/supabase/server.ts` (`createServiceRoleClient()`, service_role key) is guarded by the `server-only` package and is imported **only** from Server Actions (`src/app/watchlist-proposals/actions.ts` is the only one so far). A Server Action re-reads the row's current `status` from Supabase before mutating and rejects if it isn't in the expected state — the same "derive identity/state from a trusted source, not the caller" guard `execution_agent.py` uses for Alpaca orders (Key Architecture Rule 5), applied to dashboard writes too.
+- **RLS is enabled on every table with zero policies by default** — the anon key silently gets an empty result set back (a 200, not an error) from any table without an explicit SELECT policy, which has bitten every page built so far. `database/migrations/011_dashboard_anon_read_policies.sql` (`positions`, `portfolio_snapshots`, `watchlist_proposals`, `games`, `studios`), `012_dashboard_signal_read_policies.sql` (`player_metrics`, `sentiment_snapshots`, `patch_events`), and `013_dashboard_watchlist_read_policy.sql` (`watchlist` itself — missed by 011, which only covered `watchlist_proposals`, a different table) grant SELECT-only-for-`anon` on exactly the tables each page needs, deliberately not all at once. **Before building a new page that reads a table without an existing anon policy, write the next numbered migration and get it applied via the Supabase SQL Editor before assuming live data will appear** — there is no way to apply it programmatically (REST-only access, no direct Postgres connection from this environment).
+- **Every page needs `export const dynamic = "force-dynamic"`.** Cache Components (`cacheComponents: true`) is left disabled in `next.config.ts`, so Next defaults to prerendering a page as a static build-time snapshot the moment it has no other dynamic signal — confirmed live: `next build` silently rendered the first two pages as `○` (Static) with no warning before this export was added. Every page since has it from the start; `npm run build`'s route table (`ƒ` Dynamic vs. `○` Static) is the way to catch a regression, dev mode alone won't show it.
+- **PostgREST caps any single request at 1000 rows regardless of a higher `.limit()`.** `src/lib/supabase/paginate.ts`'s `fetchAllRows()` pages through `.range()` until a short page signals the end; every fetcher that can plausibly exceed 1000 rows (`src/lib/data/signals.ts`, `sentiment-trend.ts`) uses it instead of a single `.select().limit(n)` call.
+- **The community-vs-news sentiment split carries into the dashboard, not just synthesis.** `sentiment_snapshots.source = 'news'` must never be averaged or plotted together with `reddit`/`steam`/`youtube` as one line — see the "Sentiment pipeline internals" note above and `agents/synthesis/agent.py::_sentiment_by_game()`'s docstring for why. The `/signals/[gameId]` sentiment trend chart (`src/components/sentiment-trend-chart.tsx`) keeps `news` on its own visually distinct series (separate hue outside the community categorical set, dashed stroke) rather than blending it in.
+- **No browser-automation tool was available while building any of the above** — every page was verified live via `curl` against the dev server plus direct HTML/DB inspection, not an actual click-through. A Playwright MCP server was added afterward (`claude mcp add playwright -- npx -y @playwright/mcp@latest`, local scope) for future passes to actually drive the UI; it requires a fresh Claude Code session to attach (MCP servers load at session start, not mid-session).
+
 ---
 
 ## Running the Agents
@@ -189,6 +198,9 @@ pip install -r requirements.txt
 # database/migrations/008_news_items.sql
 # database/migrations/009_seed_ambiguous_titles.sql
 # database/migrations/010_watchlist_proposals_score.sql
+# database/migrations/011_dashboard_anon_read_policies.sql
+# database/migrations/012_dashboard_signal_read_policies.sql
+# database/migrations/013_dashboard_watchlist_read_policy.sql
 
 # Run the watchlist seeding agent (one-time, idempotent)
 python agents/orchestrator/seed_watchlist.py
