@@ -1,6 +1,10 @@
 -- Games Industry Investment Intelligence Platform
 -- Supabase PostgreSQL Schema
 -- Apply via: Supabase Dashboard → SQL Editor → Run
+--
+-- This file is the original baseline only. Any schema change after initial
+-- setup belongs in a new database/migrations/NNN_description.sql file, never
+-- a direct edit here — see CLAUDE.md's Key Architecture Rules.
 
 -- Enable pgvector if you want embedding-based similarity search later
 -- create extension if not exists vector;

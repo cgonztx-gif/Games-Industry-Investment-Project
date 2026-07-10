@@ -121,6 +121,7 @@ Always lock the model per-agent in config; never default to the most capable.
 3. **Subagents are strictly two levels deep** — orchestrator → workers; workers cannot spawn subagents (SDK constraint)
 4. **Execution subagent has Alpaca tools only** — tool restriction is the primary safety guardrail
 5. **All trade execution requires `status = 'approved'` in Supabase** — enforced inside the order-placement tool, with lifecycle hooks only as an additional mirror later
+6. **Schema changes always go through `database/migrations/`** — `database/schema.sql` is the original baseline only; never edit it for a post-setup change. Add a new numbered `database/migrations/NNN_description.sql` file instead (see the existing `001`-`010` files for the pattern), append it to the "Apply pending migrations" list below, and apply it via the Supabase SQL Editor. Keeps `schema.sql` a truthful historical snapshot and gives every change an explicit, individually-applicable, auditable step.
 
 ### Sentiment pipeline internals (`agents/workers/sentiment/`)
 The sentiment worker runs a two-pass pipeline per game for community sources (Reddit/Steam/YouTube):
