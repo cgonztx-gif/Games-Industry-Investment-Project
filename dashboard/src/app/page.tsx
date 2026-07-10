@@ -14,6 +14,7 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { PortfolioReturnChart } from "@/components/portfolio-return-chart"
+import { PositionBreakdownChart } from "@/components/position-breakdown-chart"
 import { getCurrentPositions, getPortfolioSnapshots } from "@/lib/data/portfolio"
 
 // Live account/position state -- must never serve a build-time snapshot.
@@ -118,6 +119,30 @@ export default async function PortfolioOverviewPage() {
               </div>
               <PortfolioReturnChart snapshots={snapshots} />
             </>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Portfolio Composition</CardTitle>
+          <CardDescription>
+            Share of total portfolio value held in each open position vs. cash, as of
+            the latest snapshot.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {latest === null || latest.total_value === null || latest.total_value <= 0 ? (
+            <p className="py-12 text-center text-sm text-muted-foreground">
+              No portfolio snapshot yet — composition appears once the Returns Tracker
+              records a total portfolio value.
+            </p>
+          ) : (
+            <PositionBreakdownChart
+              positions={positions}
+              totalValue={latest.total_value}
+              cash={latest.cash ?? 0}
+            />
           )}
         </CardContent>
       </Card>

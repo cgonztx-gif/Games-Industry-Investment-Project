@@ -1,5 +1,5 @@
 import { createAnonClient } from "@/lib/supabase/client"
-import { fetchAllRows } from "@/lib/supabase/paginate"
+import { fetchAllRows, normalizeToOne } from "@/lib/supabase/paginate"
 
 // The four sentiment_snapshots.source values. "news" is a different axis
 // (narrative framing, not community sentiment) and must never be averaged or
@@ -72,8 +72,7 @@ export async function getSentimentTrend(gameId: string): Promise<SentimentTrend 
   if (!gameRow) return null
 
   const typedGameRow = gameRow as GameRow
-  const studiosRel = typedGameRow.studios
-  const studio = Array.isArray(studiosRel) ? studiosRel[0] ?? null : studiosRel ?? null
+  const studio = normalizeToOne(typedGameRow.studios)
 
   const rows = await fetchAllRows<SentimentRow>((from, to) =>
     supabase

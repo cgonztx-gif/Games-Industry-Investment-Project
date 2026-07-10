@@ -2,31 +2,19 @@
 
 import * as React from "react"
 
-import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { PaginationControls } from "@/components/pagination-controls"
 import { SignalCard } from "@/components/signal-card"
+import { useSearchPagination } from "@/hooks/use-search-pagination"
 import type { SignalCard as SignalCardData } from "@/lib/data/signals"
 
 const PAGE_SIZE = 24
 
+const matchesTitle = (card: SignalCardData, q: string) => card.title.toLowerCase().includes(q)
+
 export function SignalsGrid({ cards }: { cards: SignalCardData[] }) {
-  const [query, setQuery] = React.useState("")
-  const [page, setPage] = React.useState(0)
-
-  const filtered = React.useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return cards
-    return cards.filter((card) => card.title.toLowerCase().includes(q))
-  }, [cards, query])
-
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
-  const clampedPage = Math.min(page, pageCount - 1)
-  const paged = filtered.slice(clampedPage * PAGE_SIZE, clampedPage * PAGE_SIZE + PAGE_SIZE)
-
-  function handleQueryChange(value: string) {
-    setQuery(value)
-    setPage(0)
-  }
+  const { query, setQuery, filtered, paged, pageCount, clampedPage, setPage } =
+    useSearchPagination(cards, matchesTitle, PAGE_SIZE)
 
   return (
     <div className="flex flex-1 flex-col gap-4">
@@ -34,7 +22,7 @@ export function SignalsGrid({ cards }: { cards: SignalCardData[] }) {
         <Input
           placeholder="Search by title..."
           value={query}
-          onChange={(e) => handleQueryChange(e.target.value)}
+          onChange={(e) => setQuery(e.target.value)}
           className="max-w-xs"
         />
         <p className="text-sm text-muted-foreground">
@@ -54,29 +42,12 @@ export function SignalsGrid({ cards }: { cards: SignalCardData[] }) {
         </div>
       )}
 
-      {pageCount > 1 && (
-        <div className="flex items-center justify-center gap-3">
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={clampedPage === 0}
-            onClick={() => setPage(clampedPage - 1)}
-          >
-            Previous
-          </Button>
-          <p className="text-sm text-muted-foreground">
-            Page {clampedPage + 1} of {pageCount}
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={clampedPage >= pageCount - 1}
-            onClick={() => setPage(clampedPage + 1)}
-          >
-            Next
-          </Button>
-        </div>
-      )}
+      <PaginationControls
+        clampedPage={clampedPage}
+        pageCount={pageCount}
+        onPrevious={() => setPage(clampedPage - 1)}
+        onNext={() => setPage(clampedPage + 1)}
+      />
     </div>
   )
 }

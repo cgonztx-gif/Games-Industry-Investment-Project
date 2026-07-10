@@ -2,7 +2,7 @@
 
 import * as React from "react"
 import Link from "next/link"
-import { LineChartIcon, ListChecksIcon, Gamepad2Icon, ActivityIcon } from "lucide-react"
+import { LineChartIcon, ListChecksIcon, Gamepad2Icon, ActivityIcon, NewspaperIcon, CheckCircle2Icon, HistoryIcon } from "lucide-react"
 
 import { NavMain } from "@/components/nav-main"
 import {
@@ -27,9 +27,24 @@ const navMain = [
     icon: <ListChecksIcon />,
   },
   {
+    title: "Trade Plans",
+    url: "/trade-plans",
+    icon: <CheckCircle2Icon />,
+  },
+  {
+    title: "Trade History",
+    url: "/trade-history",
+    icon: <HistoryIcon />,
+  },
+  {
     title: "Game Signals",
     url: "/signals",
     icon: <ActivityIcon />,
+  },
+  {
+    title: "Weekly Briefings",
+    url: "/briefings",
+    icon: <NewspaperIcon />,
   },
 ]
 

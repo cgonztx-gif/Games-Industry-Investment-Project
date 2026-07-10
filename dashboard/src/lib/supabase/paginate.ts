@@ -7,6 +7,15 @@
 // (originally built in `data/signals.ts`, extracted here for reuse).
 const FETCH_PAGE_SIZE = 1000
 
+// supabase-js types every PostgREST embed relation as an array, even a
+// to-one embed guaranteed at most one row by its FK -- previously hand-rolled
+// identically in watchlist-proposals.ts, sentiment-trend.ts, signals.ts, and
+// trade-history.ts. Extracted here for the same reason fetchAllRows was.
+export function normalizeToOne<T>(value: T | T[] | null | undefined): T | null {
+  if (Array.isArray(value)) return value[0] ?? null
+  return value ?? null
+}
+
 export async function fetchAllRows<T>(
   fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>
 ): Promise<T[]> {

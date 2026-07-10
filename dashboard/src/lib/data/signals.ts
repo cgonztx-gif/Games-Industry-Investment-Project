@@ -1,5 +1,5 @@
 import { createAnonClient } from "@/lib/supabase/client"
-import { fetchAllRows } from "@/lib/supabase/paginate"
+import { fetchAllRows, normalizeToOne } from "@/lib/supabase/paginate"
 
 // Recent-window bound for all three signal tables, so this page never scans
 // full table history -- matches health_score.py's per-component lookback
@@ -187,8 +187,7 @@ export async function getSignalCards(): Promise<SignalCard[]> {
   const patchByGame = groupByGameId(patchRows)
 
   const cards: SignalCard[] = gameRows.map((game) => {
-    const studiosRel = game.studios
-    const studio = Array.isArray(studiosRel) ? studiosRel[0] ?? null : studiosRel ?? null
+    const studio = normalizeToOne(game.studios)
 
     const playerHistory = (playerByGame.get(game.game_id) ?? [])
       .slice()

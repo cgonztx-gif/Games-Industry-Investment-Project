@@ -201,6 +201,8 @@ pip install -r requirements.txt
 # database/migrations/011_dashboard_anon_read_policies.sql
 # database/migrations/012_dashboard_signal_read_policies.sql
 # database/migrations/013_dashboard_watchlist_read_policy.sql
+# database/migrations/014_dashboard_briefing_read_policy.sql
+# database/migrations/015_dashboard_trade_plan_read_policies.sql
 
 # Run the watchlist seeding agent (one-time, idempotent)
 python agents/orchestrator/seed_watchlist.py

@@ -1,4 +1,5 @@
 import { createAnonClient } from "@/lib/supabase/client"
+import { normalizeToOne } from "@/lib/supabase/paginate"
 
 export type PendingProposal = {
   proposal_id: string
@@ -38,7 +39,7 @@ export async function getPendingProposals(): Promise<PendingProposal[]> {
   // singular (game_id/studio_id each point at exactly one row), so normalize.
   return (data ?? []).map((row) => ({
     ...row,
-    games: Array.isArray(row.games) ? row.games[0] ?? null : row.games,
-    studios: Array.isArray(row.studios) ? row.studios[0] ?? null : row.studios,
+    games: normalizeToOne(row.games as PendingProposal["games"] | PendingProposal["games"][]),
+    studios: normalizeToOne(row.studios as PendingProposal["studios"] | PendingProposal["studios"][]),
   })) as PendingProposal[]
 }
