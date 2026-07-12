@@ -2,15 +2,7 @@ import Link from "next/link"
 
 import { Badge } from "@/components/ui/badge"
 import type { RiskFlag, TopOpportunity, WeeklyBriefing } from "@/lib/data/briefings"
-
-// Same status palette + StatusDot convention as signal-card.tsx
-// (references/palette.md via the dataviz skill) -- reused here so
-// confidence/severity coloring reads consistently with the rest of the
-// dashboard rather than introducing a second ad hoc palette.
-const STATUS_GOOD = "#0ca30c"
-const STATUS_WARNING = "#fab219"
-const STATUS_CRITICAL = "#d03b3b"
-const STATUS_NEUTRAL = "#898781"
+import { STATUS_GOOD, STATUS_WARNING, STATUS_CRITICAL, STATUS_NEUTRAL } from "@/lib/status-colors"
 
 const CONFIDENCE_LABEL: Record<string, string> = {
   medium: "Medium confidence",

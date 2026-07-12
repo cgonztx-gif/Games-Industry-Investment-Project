@@ -16,25 +16,28 @@ import {
 import { PortfolioReturnChart } from "@/components/portfolio-return-chart"
 import { PositionBreakdownChart } from "@/components/position-breakdown-chart"
 import { getCurrentPositions, getPortfolioSnapshots } from "@/lib/data/portfolio"
+import { pnlClass } from "@/lib/status-colors"
 
 // Live account/position state -- must never serve a build-time snapshot.
 export const dynamic = "force-dynamic"
 
-function formatUsd(value: number | null) {
+function formatUsd(value: number | null | undefined) {
   if (value === null || value === undefined) return "—"
   return value.toLocaleString(undefined, { style: "currency", currency: "USD" })
 }
 
-function formatPct(value: number | null) {
+function formatPct(value: number | null | undefined) {
   if (value === null || value === undefined) return "—"
   return `${value > 0 ? "+" : ""}${value.toFixed(2)}%`
 }
 
-function pnlClass(value: number | null) {
-  if (value === null || value === undefined) return "text-muted-foreground"
-  if (value > 0) return "text-[#006300] dark:text-[#0ca30c]"
-  if (value < 0) return "text-[#d03b3b]"
-  return "text-muted-foreground"
+function StatRow({ label, value, valueClassName }: { label: string; value: string; valueClassName?: string }) {
+  return (
+    <div className="flex items-center justify-between border-b border-border pb-3 last:border-b-0 last:pb-0">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span className={`text-sm font-semibold tabular-nums ${valueClassName ?? ""}`}>{value}</span>
+    </div>
+  )
 }
 
 export default async function PortfolioOverviewPage() {
@@ -54,74 +57,66 @@ export default async function PortfolioOverviewPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Total Value</CardDescription>
-            <CardTitle className="text-2xl tabular-nums">
-              {formatUsd(latest?.total_value ?? null)}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Cash</CardDescription>
-            <CardTitle className="text-2xl tabular-nums">
-              {formatUsd(latest?.cash ?? null)}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Total Return (since inception)</CardDescription>
-            <CardTitle className={`text-2xl tabular-nums ${pnlClass(latest?.total_return_pct ?? null)}`}>
-              {formatPct(latest?.total_return_pct ?? null)}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>S&P 500 (same window)</CardDescription>
-            <CardTitle className={`text-2xl tabular-nums ${pnlClass(latest?.benchmark_return_pct ?? null)}`}>
-              {formatPct(latest?.benchmark_return_pct ?? null)}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Cumulative Return vs. Benchmark</CardTitle>
-          <CardDescription>
-            Both series are cumulative since the first recorded snapshot, not week-over-week.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {snapshots.length === 0 ? (
-            <p className="py-12 text-center text-sm text-muted-foreground">
-              No portfolio snapshots yet — the Returns Tracker writes one after the first
-              weekly pipeline run with an Alpaca account fetch.
-            </p>
-          ) : (
-            <>
-              <div className="mb-4 flex items-center gap-4 text-sm text-muted-foreground">
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader className="flex flex-row items-start justify-between gap-4">
+            <div>
+              <CardDescription>Total Value</CardDescription>
+              <CardTitle className="text-3xl tabular-nums">
+                {formatUsd(latest?.total_value ?? null)}
+              </CardTitle>
+              <p className={`text-sm font-medium tabular-nums ${pnlClass(latest?.total_return_pct ?? null)}`}>
+                {formatPct(latest?.total_return_pct ?? null)} since inception
+              </p>
+            </div>
+            {snapshots.length > 0 && (
+              <div className="flex flex-col items-end gap-1.5 text-sm text-muted-foreground">
                 <span className="flex items-center gap-1.5">
-                  <span className="inline-block h-0.5 w-4 rounded-full bg-[#2a78d6]" />
+                  <span className="inline-block h-0.5 w-4 rounded-full bg-primary" />
                   Portfolio
                 </span>
                 <span className="flex items-center gap-1.5">
                   <span
                     className="inline-block w-4"
-                    style={{ borderTop: "2px dashed #898781" }}
+                    style={{ borderTop: "2px dashed #71717a" }}
                   />
                   S&P 500
                 </span>
               </div>
+            )}
+          </CardHeader>
+          <CardContent>
+            {snapshots.length === 0 ? (
+              <p className="py-12 text-center text-sm text-muted-foreground">
+                No portfolio snapshots yet — the Returns Tracker writes one after the first
+                weekly pipeline run with an Alpaca account fetch.
+              </p>
+            ) : (
               <PortfolioReturnChart snapshots={snapshots} />
-            </>
-          )}
-        </CardContent>
-      </Card>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Account</CardTitle>
+            <CardDescription>As of the latest snapshot</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <StatRow label="Cash" value={formatUsd(latest?.cash ?? null)} />
+            <StatRow
+              label="Total Return"
+              value={formatPct(latest?.total_return_pct ?? null)}
+              valueClassName={pnlClass(latest?.total_return_pct ?? null)}
+            />
+            <StatRow
+              label="S&P 500 (same window)"
+              value={formatPct(latest?.benchmark_return_pct ?? null)}
+              valueClassName={pnlClass(latest?.benchmark_return_pct ?? null)}
+            />
+          </CardContent>
+        </Card>
+      </div>
 
       <Card>
         <CardHeader>

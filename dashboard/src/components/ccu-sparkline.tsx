@@ -3,11 +3,12 @@
 import { Line, LineChart, ResponsiveContainer, Tooltip } from "recharts"
 
 import type { PlayerMetricPoint } from "@/lib/data/signals"
+import { BRAND } from "@/lib/status-colors"
 
 // Single series -- no legend box per the dataviz skill (the card title
-// already names what's plotted); same categorical slot-1 blue as the
-// Portfolio Overview chart (portfolio-return-chart.tsx) for consistency.
-const SERIES_CCU = "#2a78d6"
+// already names what's plotted); same brand-green as the Portfolio Overview
+// hero chart (portfolio-return-chart.tsx) for consistency.
+const SERIES_CCU = BRAND
 
 function ChartTooltip({
   active,

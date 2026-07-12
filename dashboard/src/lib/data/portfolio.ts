@@ -44,3 +44,20 @@ export async function getPortfolioSnapshots(): Promise<PortfolioSnapshot[]> {
   }
   return data ?? []
 }
+
+// Single-row lookup for the global header chip -- cheaper than fetching the
+// full snapshot history just to read the last row.
+export async function getLatestPortfolioSnapshot(): Promise<PortfolioSnapshot | null> {
+  const supabase = createAnonClient()
+  const { data, error } = await supabase
+    .from("portfolio_snapshots")
+    .select("snapshot_id, date, total_value, cash, total_return_pct, benchmark_return_pct")
+    .order("date", { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) {
+    throw new Error(`Failed to load latest portfolio snapshot: ${error.message}`)
+  }
+  return data
+}

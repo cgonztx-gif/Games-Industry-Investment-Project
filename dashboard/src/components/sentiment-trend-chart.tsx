@@ -29,11 +29,13 @@ export const SOURCE_LABEL: Record<SentimentSource, string> = {
   news: "News",
 }
 
+// Dark-surface steps (validated against this theme's #0a0a0a/#131313
+// surfaces -- see the plan file's contrast report).
 const SOURCE_COLOR: Record<SentimentSource, string> = {
-  steam: "#2a78d6", // categorical slot 1 (blue)
-  reddit: "#1baf7a", // categorical slot 2 (aqua)
-  youtube: "#eda100", // categorical slot 3 (yellow)
-  news: "#e34948", // categorical slot 6 (red) -- distinct from the three
+  steam: "#3987e5", // categorical slot 1 (blue)
+  reddit: "#199e70", // categorical slot 2 (aqua)
+  youtube: "#c98500", // categorical slot 3 (yellow)
+  news: "#e66767", // categorical slot 6 (red) -- distinct from the three
   // community slots above; paired with a dashed stroke below so it never
   // reads as a fourth community source.
 }

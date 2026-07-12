@@ -11,13 +11,7 @@ import {
 } from "@/components/ui/card"
 import { CcuSparkline } from "@/components/ccu-sparkline"
 import type { CadenceStatus, SignalCard as SignalCardData } from "@/lib/data/signals"
-
-// Status palette per the dataviz skill (references/palette.md) -- reserved
-// for state, distinct from the chart's categorical series hues.
-const STATUS_GOOD = "#0ca30c"
-const STATUS_WARNING = "#fab219"
-const STATUS_CRITICAL = "#d03b3b"
-const STATUS_NEUTRAL = "#898781" // muted ink -- "baseline"/no-signal-yet
+import { STATUS_GOOD, STATUS_WARNING, STATUS_CRITICAL, STATUS_NEUTRAL } from "@/lib/status-colors"
 
 const CADENCE_LABEL: Record<CadenceStatus, string> = {
   on_pace: "On pace",

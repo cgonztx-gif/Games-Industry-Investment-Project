@@ -1,5 +1,6 @@
 "use client"
 
+import type { CSSProperties } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { PaginationControls } from "@/components/pagination-controls"
@@ -22,6 +23,7 @@ import {
 } from "@/components/ui/table"
 import { useSearchPagination } from "@/hooks/use-search-pagination"
 import type { TradeHistoryOrder } from "@/lib/data/trade-history"
+import { STATUS_GOOD, STATUS_CRITICAL } from "@/lib/status-colors"
 
 const PAGE_SIZE = 25
 
@@ -51,12 +53,11 @@ function formatSizeUsd(sizeUsd: number | null): string {
   })
 }
 
-// Same hex-color convention as page.tsx's pnlClass -- buy/sell read like a
-// gain/loss signal, hold is neutral.
-function actionClass(action: string): string {
-  if (action === "buy") return "text-[#006300] dark:text-[#0ca30c] font-medium"
-  if (action === "sell") return "text-[#d03b3b] font-medium"
-  return "text-muted-foreground"
+// Buy/sell read like a gain/loss signal (status-colors.ts), hold is neutral.
+function actionStyle(action: string): CSSProperties | undefined {
+  if (action === "buy") return { color: STATUS_GOOD }
+  if (action === "sell") return { color: STATUS_CRITICAL }
+  return undefined
 }
 
 function RationaleDialog({ order }: { order: TradeHistoryOrder }) {
@@ -129,7 +130,7 @@ export function TradeHistoryTable({ orders }: { orders: TradeHistoryOrder[] }) {
             {paged.map((order) => (
               <TableRow key={order.order_id}>
                 <TableCell className="font-medium">{order.ticker}</TableCell>
-                <TableCell className={`capitalize ${actionClass(order.action)}`}>
+                <TableCell className="font-medium capitalize" style={actionStyle(order.action)}>
                   {order.action}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">

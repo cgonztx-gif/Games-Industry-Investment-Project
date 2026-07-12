@@ -18,22 +18,26 @@ import type { Position } from "@/lib/data/portfolio"
 // position first) rather than pinned per-ticker. Slot 8 (orange) is
 // reserved for an "Other" fold-in once the series-count ladder's 7-series
 // soft cap is exceeded, instead of generating a 9th hue.
+// Dark-surface steps (validated against this theme's #0a0a0a/#131313
+// surfaces -- see the plan file's contrast report; worst adjacent CVD ΔE
+// 10.3, floor band, legal because this chart always ships the swatch/label
+// legend below).
 const CATEGORICAL_SLOTS = [
-  "#2a78d6", // slot 1 blue
-  "#1baf7a", // slot 2 aqua
-  "#eda100", // slot 3 yellow
+  "#3987e5", // slot 1 blue
+  "#199e70", // slot 2 aqua
+  "#c98500", // slot 3 yellow
   "#008300", // slot 4 green
-  "#4a3aa7", // slot 5 violet
-  "#e34948", // slot 6 red
-  "#e87ba4", // slot 7 magenta
-  "#eb6834", // slot 8 orange ("Other" fold-in)
+  "#9085e9", // slot 5 violet
+  "#e66767", // slot 6 red
+  "#d55181", // slot 7 magenta
+  "#d95926", // slot 8 orange ("Other" fold-in)
 ]
 const MAX_NAMED_POSITIONS = 7
 
 // Cash isn't an invested identity -- it's the uninvested "resting" state of
 // capital, so (like the S&P 500 reference line in portfolio-return-chart.tsx)
 // it wears neutral muted gray rather than a categorical hue.
-const CASH_COLOR = "#898781"
+const CASH_COLOR = "#71717a"
 
 export type Segment = {
   key: string

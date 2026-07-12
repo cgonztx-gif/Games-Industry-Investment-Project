@@ -1,4 +1,10 @@
 import { Badge } from "@/components/ui/badge"
+import { STATUS_GOOD } from "@/lib/status-colors"
+
+// Distinct from STATUS_GOOD -- "approved" is a different workflow state than
+// "filled" and must not read as the same color (categorical slot 1, dark
+// surface step; see the plan file's palette report).
+const APPROVED_COLOR = "#3987e5"
 
 // Single canonical trade_orders.status -> color mapping, shared by
 // trade-plan-card.tsx and trade-history-table.tsx so the same order can't
@@ -8,7 +14,8 @@ export function TradeOrderStatusBadge({ status }: { status: string }) {
     return (
       <Badge
         variant="outline"
-        className="border-[#006300]/30 bg-[#006300]/10 text-[#006300] dark:border-[#0ca30c]/30 dark:bg-[#0ca30c]/10 dark:text-[#0ca30c]"
+        className="border-[#22c55e]/30 bg-[#22c55e]/10"
+        style={{ color: STATUS_GOOD }}
       >
         filled
       </Badge>
@@ -16,7 +23,11 @@ export function TradeOrderStatusBadge({ status }: { status: string }) {
   }
   if (status === "approved") {
     return (
-      <Badge variant="outline" className="border-[#2a78d6]/30 bg-[#2a78d6]/10 text-[#2a78d6]">
+      <Badge
+        variant="outline"
+        className="border-[#3987e5]/30 bg-[#3987e5]/10"
+        style={{ color: APPROVED_COLOR }}
+      >
         approved
       </Badge>
     )
