@@ -230,6 +230,48 @@ def test_fetch_youtube_comments_respects_max_videos_cap(monkeypatch):
     assert len(comments) == 2
 
 
+def test_fetch_youtube_comments_interleaves_multiple_trusted_playlists(monkeypatch):
+    """
+    Regression test: with 2+ trusted playlists and max_videos capping the
+    combined pool, videos must be interleaved round-robin across playlists,
+    not concatenated -- otherwise a playlist listed first (e.g. an official
+    trailer channel with comments disabled) starves every later playlist's
+    videos out of the truncated result entirely.
+    """
+    monkeypatch.setenv("YOUTUBE_API_KEY", "key")
+    monkeypatch.delenv("YOUTUBE_UPLOAD_PLAYLISTS", raising=False)
+
+    fake_get = _make_fake_get(
+        playlist_items={
+            "UUofficial": [
+                {"title": "Trailer 1", "description": "", "videoId": "official1"},
+                {"title": "Trailer 2", "description": "", "videoId": "official2"},
+            ],
+            "UUcommunity": [
+                {"title": "Community video 1", "description": "", "videoId": "community1"},
+                {"title": "Community video 2", "description": "", "videoId": "community2"},
+            ],
+        },
+        comment_threads={
+            # Official channel videos have comments disabled -- 0 comments.
+            "official1": [],
+            "official2": [],
+            "community1": [{"text": "great strat", "likeCount": 1}],
+            "community2": [{"text": "nice build", "likeCount": 1}],
+        },
+    )
+    monkeypatch.setattr(youtube_client.requests, "get", fake_get)
+    monkeypatch.setattr(youtube_client.time, "sleep", lambda *_: None)
+
+    comments = youtube_client.fetch_youtube_comments(
+        "Fortnite",
+        max_videos=2,
+        game_playlist_ids=["UUofficial", "UUcommunity"],
+    )
+    assert len(comments) == 1
+    assert comments[0]["video_id"] == "community1"
+
+
 def test_fetch_youtube_comments_uses_cache(monkeypatch):
     monkeypatch.setenv("YOUTUBE_API_KEY", "key")
     monkeypatch.setenv("YOUTUBE_UPLOAD_PLAYLISTS", "UUglobal")

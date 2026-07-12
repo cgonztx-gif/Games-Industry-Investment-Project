@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -110,8 +111,15 @@ def _trusted_candidate_videos(
     playlists (load_game_youtube_playlists()) -- returns each playlist's most
     recent uploads directly, with no title/description filtering, since the
     curation itself is the relevance signal.
+
+    Videos are interleaved round-robin across playlists rather than
+    concatenated playlist-by-playlist, since the caller truncates the
+    combined result to max_videos: a plain concatenation would let an early
+    playlist (often the official/trailer channel, which commonly has
+    comments disabled or hidden) crowd out every later playlist's videos
+    entirely once per-playlist limit >= max_videos / len(playlist_ids).
     """
-    video_ids: list[str] = []
+    per_playlist: list[list[str]] = []
     for playlist_id in playlist_ids:
         data = _get(
             f"{_YOUTUBE_API}/playlistItems",
@@ -122,9 +130,18 @@ def _trusted_candidate_videos(
                 "maxResults": min(per_playlist_limit, 50),
             },
         )
-        for item in data.get("items", []):
-            video_id = (item.get("contentDetails") or {}).get("videoId")
-            if video_id and video_id not in video_ids:
+        ids = [
+            (item.get("contentDetails") or {}).get("videoId")
+            for item in data.get("items", [])
+        ]
+        per_playlist.append([v for v in ids if v])
+
+    video_ids: list[str] = []
+    seen: set[str] = set()
+    for round_videos in itertools.zip_longest(*per_playlist):
+        for video_id in round_videos:
+            if video_id and video_id not in seen:
+                seen.add(video_id)
                 video_ids.append(video_id)
     return video_ids
 
