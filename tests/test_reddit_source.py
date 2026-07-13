@@ -46,6 +46,7 @@ _ENV_VARS = (
     "REDDIT_CLIENT_SECRET",
     "REDDIT_REFRESH_TOKEN",
     "REDDIT_PROXY_URL",
+    "REDDIT_PROXY_INSECURE_SSL",
     "REDDIT_SOURCE_PAUSED",
 )
 
@@ -237,6 +238,51 @@ def test_json_source_resolve_subreddit_returns_none_below_threshold():
     assert source.resolve_subreddit("Fortnite") is None
 
 
+def _proxy_soft_failure_body():
+    """Shape ScrapeOps returns with HTTP 200 when its proxy pool can't reach
+    Reddit -- a bare dict with a string "status" key and no "data" key."""
+    return {"status": "We couldn't retrieve a successful response for this request."}
+
+
+def test_json_source_200_with_proxy_soft_failure_body_raises_reddit_blocked():
+    source, _ = _make_json_source([_FakeResponse(200, _proxy_soft_failure_body())])
+    try:
+        source.fetch_posts("testsub")
+        assert False, "expected RedditBlocked"
+    except RedditBlocked:
+        pass
+
+
+def test_json_source_200_empty_listing_does_not_false_positive_as_soft_failure():
+    # Regression guard: a real empty listing ({"data": {"children": []}}) has
+    # a "data" key, so it must still parse as zero posts, not RedditBlocked.
+    source, _ = _make_json_source([_FakeResponse(200, _post_listing([]))])
+    posts = source.fetch_posts("testsub")
+    assert posts == []
+
+
+def test_json_source_connection_error_then_200_retries_and_succeeds(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    responses = [
+        requests.exceptions.ConnectionError("reset"),
+        _FakeResponse(200, _post_listing([_post_child()])),
+    ]
+    source, _ = _make_json_source(responses)
+    posts = source.fetch_posts("testsub")
+    assert len(posts) == 1
+
+
+def test_json_source_proxy_error_retries_exhausted_raises_reddit_blocked(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    responses = [requests.exceptions.ProxyError("no route") for _ in range(3)]
+    source, _ = _make_json_source(responses)
+    try:
+        source.fetch_posts("testsub")
+        assert False, "expected RedditBlocked"
+    except RedditBlocked:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # CachedRedditSource
 # ---------------------------------------------------------------------------
@@ -391,6 +437,47 @@ def test_proxied_source_inherits_403_and_429_handling_unchanged(monkeypatch):
         pass
 
 
+def test_proxied_source_defaults_to_verify_true():
+    session = _FakeSession([_FakeResponse(200, _post_listing([_post_child()]))])
+    ProxiedJsonRedditSource(
+        proxy_url="http://proxy.example:8080", limiter=_fast_limiter(), session=session
+    )
+    assert session.verify is True
+
+
+def test_proxied_source_verify_false_sets_session_verify_false():
+    session = _FakeSession([_FakeResponse(200, _post_listing([_post_child()]))])
+    ProxiedJsonRedditSource(
+        proxy_url="http://proxy.example:8080", limiter=_fast_limiter(), session=session, verify=False
+    )
+    assert session.verify is False
+
+
+def test_proxied_source_inherits_soft_failure_detection_unchanged():
+    session = _FakeSession([_FakeResponse(200, _proxy_soft_failure_body())])
+    source = ProxiedJsonRedditSource(
+        proxy_url="http://proxy.example:8080", limiter=_fast_limiter(), session=session
+    )
+    try:
+        source.fetch_posts("testsub")
+        assert False, "expected RedditBlocked"
+    except RedditBlocked:
+        pass
+
+
+def test_proxied_source_inherits_connection_error_retry_unchanged(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    session = _FakeSession([
+        requests.exceptions.ProxyError("reset"),
+        _FakeResponse(200, _post_listing([_post_child()])),
+    ])
+    source = ProxiedJsonRedditSource(
+        proxy_url="http://proxy.example:8080", limiter=_fast_limiter(), session=session
+    )
+    posts = source.fetch_posts("testsub")
+    assert len(posts) == 1
+
+
 # ---------------------------------------------------------------------------
 # OAuthRedditSource
 # ---------------------------------------------------------------------------
@@ -518,6 +605,18 @@ def test_oauth_fetch_path_has_no_json_suffix_and_sends_bearer_header(monkeypatch
     assert kwargs["headers"]["Authorization"] == "Bearer tok1"
 
 
+def test_oauth_connection_error_then_200_retries_and_succeeds(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    session = _FakeSession([
+        _FakeResponse(200, {"access_token": "tok1", "expires_in": 3600}),
+        requests.exceptions.ConnectionError("reset"),
+        _FakeResponse(200, _post_listing([_post_child()])),
+    ])
+    source = _oauth_source(session)
+    posts = source.fetch_posts("testsub")
+    assert len(posts) == 1
+
+
 def test_oauth_resolve_subreddit_hits_oauth_search_endpoint(monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda s: None)
     session = _FakeSession([
@@ -573,6 +672,23 @@ def test_build_reddit_source_proxy_only_returns_two_element_chain_in_order(monke
     assert type(source.sources[1]) is CachedRedditSource
     assert type(source.sources[1].inner) is JsonRedditSource
     assert calls == ["reddit_proxy", "reddit"]
+
+
+def test_build_leaf_sources_proxy_only_defaults_verify_true(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("REDDIT_PROXY_URL", "http://proxy.example:8080")
+    leaves = _build_leaf_sources()
+    proxy_leaf = next(l for l in leaves if type(l) is ProxiedJsonRedditSource)
+    assert proxy_leaf.session.verify is True
+
+
+def test_build_leaf_sources_proxy_insecure_ssl_env_var_sets_verify_false(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("REDDIT_PROXY_URL", "http://proxy.example:8080")
+    monkeypatch.setenv("REDDIT_PROXY_INSECURE_SSL", "true")
+    leaves = _build_leaf_sources()
+    proxy_leaf = next(l for l in leaves if type(l) is ProxiedJsonRedditSource)
+    assert proxy_leaf.session.verify is False
 
 
 def test_build_reddit_source_partial_oauth_behaves_like_no_vars(monkeypatch):

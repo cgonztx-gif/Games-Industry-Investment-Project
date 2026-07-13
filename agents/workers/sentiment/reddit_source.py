@@ -12,6 +12,13 @@ first when configured:
        three required together) -- OAuthRedditSource, plain `requests`, no `praw`.
     2. Standard HTTP/HTTPS proxy (REDDIT_PROXY_URL) -- ProxiedJsonRedditSource, a
        thin JsonRedditSource subclass that only swaps the session's proxies.
+       REDDIT_PROXY_INSECURE_SSL (optional, same truthy-string convention as
+       REDDIT_SOURCE_PAUSED below) disables TLS verification on this leaf's
+       session -- needed only for a proxy that does TLS interception, confirmed
+       required for ScrapeOps (live-tested 2026-07-13; also needs its proxy
+       URL's username to carry ScrapeOps' own `residential=true` flag to avoid
+       its datacenter pool, which gets stonewalled by Reddit the same way
+       GitHub Actions' IPs are -- a config-value concern, not code).
 
 Caching and graceful degradation are handled by CachedRedditSource + RedditCache,
 one per-leaf cache namespace ("reddit" / "reddit_proxy" / "reddit_oauth") so a
@@ -37,6 +44,17 @@ both factories return NullRedditSource() instead -- zero network calls, every
 call raises RedditBlocked immediately. Added 2026-07-09 to stop paying for a
 guaranteed-failed request on every game/candidate every run while no real
 egress path (OAuth or proxy) is configured yet; unset it to resume once one is.
+
+Added 2026-07-13, found live-testing the proxy path against ScrapeOps: (1) a
+degraded proxy can return HTTP 200 with an in-band JSON error body instead of
+an HTTP error status -- _get() now detects this shape (_looks_like_proxy_soft_failure)
+and raises RedditBlocked so it hits the normal stale-cache/fallback path instead
+of being silently parsed as "zero results found"; (2) a connection-level
+exception (e.g. ProxyError from a rotating residential pool) raised by
+session.get() itself, as opposed to a bad status code, previously had no
+retry/backoff handling in either JsonRedditSource._get() or
+OAuthRedditSource._get() and would crash the run -- both now retry with the
+same backoff used for 429/503 before giving up.
 """
 
 from __future__ import annotations
@@ -251,6 +269,18 @@ def _parse_subreddit_search(data: dict, game_title: str) -> str | None:
     return best_name if best_ratio >= 0.70 else None
 
 
+def _looks_like_proxy_soft_failure(data) -> bool:
+    """A real Reddit listing/search response is always a list (comments) or a
+    dict containing "data" (posts/search). A proxy's in-band error body (e.g.
+    ScrapeOps' {"status": "We couldn't retrieve a successful response..."})
+    is a bare dict with a string "status" key and no "data" key -- a shape
+    that never occurs in a genuine Reddit response. Confirmed live 2026-07-13:
+    ScrapeOps returns HTTP 200 with this body when its proxy pool can't
+    reach Reddit, which would otherwise be silently parsed as "zero results"
+    instead of triggering the RedditBlocked fallback/stale-cache path."""
+    return isinstance(data, dict) and "data" not in data and isinstance(data.get("status"), str)
+
+
 # ---------------------------------------------------------------------------
 # Primary source: unauthenticated .json endpoints
 # ---------------------------------------------------------------------------
@@ -272,9 +302,22 @@ class JsonRedditSource:
         url = f"{_BASE}{path}"
         for attempt in range(1, self.max_retries + 1):
             self.limiter.wait()
-            resp = self.session.get(url, params=params, timeout=15)
+            try:
+                resp = self.session.get(url, params=params, timeout=15)
+            except requests.exceptions.RequestException as exc:
+                backoff = 2 ** attempt
+                logger.warning(
+                    "network error on %s (attempt %d/%d): %s; backoff %.0fs",
+                    url, attempt, self.max_retries, exc, backoff,
+                )
+                time.sleep(backoff)
+                continue
             if resp.status_code == 200:
-                return resp.json()
+                payload = resp.json()
+                if _looks_like_proxy_soft_failure(payload):
+                    logger.warning("proxy soft-failure body on %s: %r", url, payload)
+                    raise RedditBlocked(f"proxy soft-failure on {url}")
+                return payload
             if resp.status_code in (429, 503):
                 backoff = float(resp.headers.get("Retry-After", 2 ** attempt))
                 logger.warning(
@@ -335,7 +378,11 @@ class JsonRedditSource:
 
 class ProxiedJsonRedditSource(JsonRedditSource):
     """Same as JsonRedditSource, routed through a standard HTTP/HTTPS proxy.
-    No SOCKS5 -- requests.Session supports http(s) proxies natively, zero new deps."""
+    No SOCKS5 -- requests.Session supports http(s) proxies natively, zero new deps.
+    verify=False is only needed for a proxy that does TLS interception to
+    inspect the tunneled request (confirmed required for ScrapeOps, live-tested
+    2026-07-13 -- fails with CERTIFICATE_VERIFY_FAILED otherwise); defaults to
+    True (secure) since a plain passthrough proxy needs no special handling."""
 
     def __init__(
         self,
@@ -344,9 +391,11 @@ class ProxiedJsonRedditSource(JsonRedditSource):
         limiter: RateLimiter | None = None,
         max_retries: int = 3,
         session: requests.Session | None = None,
+        verify: bool = True,
     ) -> None:
         session = session or requests.Session()
         session.proxies.update({"http": proxy_url, "https": proxy_url})
+        session.verify = verify
         super().__init__(
             user_agent=user_agent,
             limiter=limiter,
@@ -415,12 +464,21 @@ class OAuthRedditSource:
         for attempt in range(1, self.max_retries + 1):
             token = self._ensure_token()
             self.limiter.wait()
-            resp = self.session.get(
-                url,
-                params=params,
-                timeout=15,
-                headers={"Authorization": f"Bearer {token}"},
-            )
+            try:
+                resp = self.session.get(
+                    url,
+                    params=params,
+                    timeout=15,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            except requests.exceptions.RequestException as exc:
+                backoff = 2 ** attempt
+                logger.warning(
+                    "oauth network error on %s (attempt %d/%d): %s; backoff %.0fs",
+                    url, attempt, self.max_retries, exc, backoff,
+                )
+                time.sleep(backoff)
+                continue
             if resp.status_code == 200:
                 return resp.json()
             if resp.status_code == 401:
@@ -590,7 +648,8 @@ def _build_leaf_sources() -> list[RedditSource]:
         ))
     proxy_url = os.environ.get("REDDIT_PROXY_URL")
     if proxy_url:
-        leaves.append(ProxiedJsonRedditSource(proxy_url=proxy_url))
+        insecure = os.environ.get("REDDIT_PROXY_INSECURE_SSL", "").strip().lower() in ("1", "true", "yes")
+        leaves.append(ProxiedJsonRedditSource(proxy_url=proxy_url, verify=not insecure))
     leaves.append(JsonRedditSource())
     return leaves
 

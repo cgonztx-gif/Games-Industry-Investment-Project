@@ -27,6 +27,8 @@ jobs:
           TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
           RAWG_API_KEY:         ${{ secrets.RAWG_API_KEY }}
           STEAM_API_KEY:        ${{ secrets.STEAM_API_KEY }}
+          REDDIT_PROXY_URL:          ${{ secrets.REDDIT_PROXY_URL }}
+          REDDIT_PROXY_INSECURE_SSL: ${{ secrets.REDDIT_PROXY_INSECURE_SSL }}
           LANGSMITH_API_KEY:    ${{ secrets.LANGSMITH_API_KEY }}
           LANGSMITH_PROJECT:    ${{ secrets.LANGSMITH_PROJECT }}
           YOUTUBE_API_KEY:      ${{ secrets.YOUTUBE_API_KEY }}

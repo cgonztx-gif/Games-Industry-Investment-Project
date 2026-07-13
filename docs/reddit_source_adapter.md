@@ -279,11 +279,14 @@ rather than duplicating it.
 ```python
 class ProxiedJsonRedditSource(JsonRedditSource):
     """Same as JsonRedditSource, routed through a standard HTTP/HTTPS proxy.
-    No SOCKS5 -- requests.Session supports http(s) proxies natively, zero new deps."""
+    No SOCKS5 -- requests.Session supports http(s) proxies natively, zero new deps.
+    verify=False is only needed for a proxy that does TLS interception to inspect
+    the tunneled request (confirmed required for ScrapeOps); defaults to True."""
     def __init__(self, proxy_url: str, user_agent=_USER_AGENT, limiter=None,
-                 max_retries=3, session=None):
+                 max_retries=3, session=None, verify: bool = True):
         session = session or requests.Session()
         session.proxies.update({"http": proxy_url, "https": proxy_url})
+        session.verify = verify
         super().__init__(user_agent=user_agent, limiter=limiter,
                           max_retries=max_retries, session=session)
 
@@ -337,6 +340,42 @@ All four new env vars (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRE
 returns a bare `CachedRedditSource(JsonRedditSource(), cache)` — bit-for-bit identical to
 the object graph before this change. `resolve_subreddit` also now flows through
 `build_subreddit_resolver()` rather than a hardcoded, ungated `JsonRedditSource()`.
+
+**Proxy soft-failure detection + connection-error retry, added 2026-07-13.** Live-testing
+`ProxiedJsonRedditSource` against a real proxy provider (ScrapeOps) surfaced two gaps in
+`JsonRedditSource._get()` that a bad-status-code-only check missed:
+
+1. A degraded proxy can return HTTP `200` with an in-band JSON error body instead of an
+   HTTP error status — e.g. ScrapeOps' `{"status": "We couldn't retrieve a successful
+   response..."}` when its pool can't reach Reddit. Since `_get()` only branched on status
+   code, this was silently parsed as "zero posts/comments/no subreddit match found" rather
+   than a block, and would have poisoned `cached_resolve_subreddit()`'s 30-day cache with a
+   false no-match. Fixed via a module-level `_looks_like_proxy_soft_failure(data)` check on
+   every 200 response: a real Reddit listing/search response is always a list (comments) or
+   a dict containing `"data"`; a bare dict with a string `"status"` key and no `"data"` key
+   is a shape that never occurs genuinely, so it's treated as `RedditBlocked` instead.
+2. A connection-level exception (`ProxyError`/`ConnectionError`) raised by `session.get()`
+   itself — routine with a rotating residential proxy pool — had no retry handling in either
+   `JsonRedditSource._get()` or `OAuthRedditSource._get()` and would crash the run. Both now
+   retry with the same exponential backoff already used for 429/503, falling through to the
+   existing `RedditBlocked("retries exhausted...")` if every attempt fails.
+
+Both fixes live in the shared base methods (not `ProxiedJsonRedditSource`-only), so the
+always-on default unauthenticated path benefits too, not just the proxy leaf.
+
+**ScrapeOps as the configured provider, 2026-07-13.** Confirmed live end-to-end
+(`fetch_posts`, `fetch_comments`, `resolve_subreddit`) through the unmodified-then-patched
+`ProxiedJsonRedditSource` class. Two things beyond a bare `REDDIT_PROXY_URL` were required:
+ScrapeOps' default/datacenter proxy pool gets stonewalled by Reddit the same way GitHub
+Actions' IPs are, fixed by baking `residential=true` into the proxy URL's username
+(`http://scrapeops.residential=true:<API_KEY>@proxy.scrapeops.io:5353` — a config-value
+concern, no code involved); and ScrapeOps' proxy does TLS interception to inspect the
+tunneled request, requiring `verify=False` or every request fails with
+`CERTIFICATE_VERIFY_FAILED`. The latter is exposed as `REDDIT_PROXY_INSECURE_SSL` (optional,
+same truthy-string convention as `REDDIT_SOURCE_PAUSED`, read in `_build_leaf_sources()` and
+passed to `ProxiedJsonRedditSource`'s `verify` param) rather than hardcoded, since a plain
+corporate/passthrough proxy configured via the same `REDDIT_PROXY_URL` slot should keep
+verification on by default.
 
 ## 7. Integration with the Sentiment Subagent (CrewAI at MVP)
 
@@ -408,6 +447,13 @@ egress with a cleaner IP (a small always-on box, or a managed scraping API as th
 > egress) is now implemented — see §6 above — as `ProxiedJsonRedditSource` and
 > `OAuthRedditSource`, both gated behind optional env vars and opt-in (not automatically
 > active until the user supplies real credentials/a real proxy).
+>
+> **Update, 2026-07-13 — mitigation tier 3 confirmed live, not just implemented.**
+> ScrapeOps was live-tested end-to-end as the configured `REDDIT_PROXY_URL` provider and
+> real Reddit responses (posts, comments, subreddit resolution) were obtained through the
+> project's own `ProxiedJsonRedditSource` class. Required its proxy URL to carry
+> `residential=true` (ScrapeOps' datacenter pool alone hits the same kind of wall) and
+> `REDDIT_PROXY_INSECURE_SSL=true` (ScrapeOps' proxy does TLS interception). See §6 above.
 
 **Comment "more" nodes.** Deep/collapsed threads return `kind: "more"` placeholders
 that the code skips. For sentiment, top-level + first-level replies are almost always
@@ -416,20 +462,25 @@ enough signal; only add the `morechildren` expansion if you find you're missing 
 **Deleted content.** `[deleted]`/`[removed]` bodies and authors appear normally; filter
 them before scoring so they don't drag the sentiment baseline.
 
-**Testing.** `tests/test_reddit_source.py` now exists — hand-built fixture dicts plus a
-local fake `requests.Session` (records calls, pops pre-scripted responses/exceptions in
-order), not recorded cassettes as originally sketched here. Covers `JsonRedditSource`
-(200/403/451/429-backoff/retries-exhausted/nested comments/malformed responses/subreddit
-match threshold), `CachedRedditSource` (fresh hit, miss, blocked+stale, blocked+empty),
-`FirstAvailableRedditSource`, `ProxiedJsonRedditSource`, `OAuthRedditSource` (token
-lifecycle, 401/403/429 handling, no-`.json`-suffix + Bearer header), and the
+**Testing.** `tests/test_reddit_source.py` now exists (52 cases as of 2026-07-13) —
+hand-built fixture dicts plus a local fake `requests.Session` (records calls, pops
+pre-scripted responses/exceptions in order), not recorded cassettes as originally
+sketched here. Covers `JsonRedditSource` (200/403/451/429-backoff/retries-exhausted/
+nested comments/malformed responses/subreddit match threshold/proxy soft-failure-body
+detection/connection-error retry), `CachedRedditSource` (fresh hit, miss, blocked+stale,
+blocked+empty), `FirstAvailableRedditSource`, `ProxiedJsonRedditSource` (proxy URL
+applied to session, inherits 403/429/soft-failure/connection-error handling unchanged,
+`verify` default-True and override-False), `OAuthRedditSource` (token lifecycle,
+401/403/429 handling, no-`.json`-suffix + Bearer header, connection-error retry), and the
 `build_reddit_source`/`build_subreddit_resolver`/`_build_leaf_sources` factory —
-including the load-bearing proof that with all four new env vars unset, the returned
-object graph is unchanged. Zero live network calls anywhere in the suite. Note: OAuth
+including the load-bearing proof that with all five new env vars unset, the returned
+object graph is unchanged, plus `REDDIT_PROXY_INSECURE_SSL` toggling the proxy leaf's
+`session.verify`. Zero live network calls anywhere in the suite. Note: OAuth
 registration itself is a separate, manual, non-guaranteed Reddit approval process (no
 SLA as of the Nov 2025 policy) — the adapter code is *ready* to use OAuth the moment
 credentials exist, but is not *activated*, and this test suite cannot and does not
-verify a real token exchange or a real proxied request reaching Reddit.
+verify a real token exchange; the proxy path *has* been verified against a real
+provider (ScrapeOps) live outside this suite — see the update above.
 
 **Honest caveat.** The `.json` route is unofficial, and Reddit's Data API terms govern
 automated access regardless of endpoint; their wiki is explicit that non-OAuth traffic
