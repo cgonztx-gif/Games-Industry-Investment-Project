@@ -217,6 +217,19 @@ def write_player_metrics(client: Client, metrics: dict) -> None:
     client.table("player_metrics").upsert(metrics, on_conflict="game_id,date").execute()
 
 
+def write_ccu_snapshots_batch(client: Client, rows: list[dict]) -> None:
+    """
+    Bulk-insert intraday CCU snapshot rows.
+
+    A plain insert, not an upsert -- ccu_snapshots has no uniqueness
+    constraint, since multiple rows per game per day are the whole point.
+    No-op on an empty list (avoids an empty-body Supabase insert call).
+    """
+    if not rows:
+        return
+    client.table("ccu_snapshots").insert(rows).execute()
+
+
 # ---------------------------------------------------------------------------
 # Financial Overlay worker helpers
 # ---------------------------------------------------------------------------

@@ -14,7 +14,14 @@ def main() -> None:
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
     client.table("api_cache").delete().lt("fetched_at", cutoff).execute()
-    print("Supabase keepalive complete; api_cache pruned before cutoff.")
+
+    # ccu_snapshots accumulates one row per game per hour (see
+    # .github/workflows/ccu_hourly.yml) -- the dashboard only ever needs a
+    # rolling recent window, so old raw snapshots are pruned the same way.
+    ccu_cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    client.table("ccu_snapshots").delete().lt("captured_at", ccu_cutoff).execute()
+
+    print("Supabase keepalive complete; api_cache and ccu_snapshots pruned before cutoff.")
 
 
 if __name__ == "__main__":

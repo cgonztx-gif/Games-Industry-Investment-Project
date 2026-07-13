@@ -1,0 +1,26 @@
+name: ccu-hourly-snapshot
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # hourly, on the hour
+  workflow_dispatch: {}      # manual trigger from the Actions tab
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install supabase python-dotenv requests
+
+      - name: Collect hourly CCU snapshot
+        env:
+          SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
+          STEAM_API_KEY: ${{ secrets.STEAM_API_KEY }}
+        run: python scripts/collect_ccu_snapshot.py

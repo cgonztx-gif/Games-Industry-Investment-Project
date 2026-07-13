@@ -22,6 +22,7 @@ from database.db_client import (
     get_existing_proposal_status,
     get_studios_with_tickers,
     get_tracked_game_counts_by_studio,
+    write_ccu_snapshots_batch,
     write_news_item,
     write_watchlist_proposal,
 )
@@ -396,6 +397,32 @@ def test_write_news_item_upserts():
 # ---------------------------------------------------------------------------
 # write_watchlist_proposal
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# write_ccu_snapshots_batch
+# ---------------------------------------------------------------------------
+
+def test_write_ccu_snapshots_batch_inserts_all_rows():
+    db = _FakeClient()
+    rows = [
+        {"game_id": "g1", "concurrent_players": 500},
+        {"game_id": "g2", "concurrent_players": 900},
+    ]
+
+    write_ccu_snapshots_batch(db, rows)
+
+    inserted = db._inserts.get("ccu_snapshots", [])
+    assert len(inserted) == 2
+    assert {r["game_id"] for r in inserted} == {"g1", "g2"}
+
+
+def test_write_ccu_snapshots_batch_empty_list_is_a_noop():
+    db = _FakeClient()
+
+    write_ccu_snapshots_batch(db, [])
+
+    assert db._inserts.get("ccu_snapshots", []) == []
+
 
 def test_write_watchlist_proposal_inserts():
     db = _FakeClient()

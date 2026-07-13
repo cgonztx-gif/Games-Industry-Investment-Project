@@ -4,7 +4,9 @@ import { ArrowLeftIcon } from "lucide-react"
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { SentimentTrendChart, SOURCE_LABEL } from "@/components/sentiment-trend-chart"
+import { CcuIntradayChart } from "@/components/ccu-intraday-chart"
 import { getSentimentTrend } from "@/lib/data/sentiment-trend"
+import { getCcuIntraday } from "@/lib/data/ccu-intraday"
 
 // Sentiment history changes with every weekly worker run -- must never serve
 // a build-time snapshot (same bug this dashboard already hit once, see
@@ -21,6 +23,7 @@ export default async function SentimentTrendPage({
 
   if (!trend) notFound()
 
+  const ccuHistory = await getCcuIntraday(gameId)
   const notes = trend.snapshots.filter((s) => s.vocal_minority_note)
 
   return (
@@ -41,6 +44,22 @@ export default async function SentimentTrendPage({
           </p>
         )}
       </div>
+
+      {ccuHistory.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Intraday CCU</CardTitle>
+            <CardDescription>
+              Concurrent players over the last 48 hours, sampled hourly -- Steam's API only exposes a
+              current-value snapshot, so this history is built from our own hourly polling rather than
+              an official historical endpoint.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <CcuIntradayChart history={ccuHistory} />
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
