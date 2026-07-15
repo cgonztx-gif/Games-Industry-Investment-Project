@@ -298,3 +298,68 @@ def test_no_articles_returns_zeroed_stats(monkeypatch):
     assert result["articles_fetched"] == 0
     assert result["items_written"] == 0
     assert result["entities_with_coverage"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker — sustained GDELT failures abort the remaining pass instead
+# of paying full per-entity retry cost across the whole watchlist (the
+# 2026-07-13 GDELT hang: run 29275378950 never left the GDELT loop after ~5h).
+# ---------------------------------------------------------------------------
+
+def test_gdelt_circuit_breaker_aborts_after_consecutive_failures(monkeypatch):
+    entities = [_entity(f"g{i}", f"Game {i}") for i in range(30)]
+    gdelt = _FakeGdeltSource(raise_blocked=True)
+
+    _run(
+        entities=entities,
+        gdelt_source=gdelt,
+        monkeypatch=monkeypatch,
+    )
+
+    # Breaker trips at the 10th consecutive failure — no reason to attempt
+    # the remaining 20 entities in a full-watchlist-scale outage.
+    assert len(gdelt.calls) == news_worker._CONSECUTIVE_FAILURE_LIMIT
+
+
+def test_gdelt_circuit_breaker_resets_on_success(monkeypatch):
+    entities = [_entity(f"g{i}", f"Game {i}") for i in range(25)]
+
+    class _IntermittentGdelt:
+        def __init__(self):
+            self.calls = []
+
+        def search(self, query):
+            self.calls.append(query)
+            # Fail 9 in a row (just under the breaker), then succeed once —
+            # should never trip the breaker since it only counts consecutive
+            # failures, and reset back to zero after the success.
+            idx = len(self.calls) - 1
+            if idx % 10 == 9:
+                return []
+            raise GdeltBlocked("blocked")
+
+    gdelt = _IntermittentGdelt()
+
+    _run(
+        entities=entities,
+        gdelt_source=gdelt,
+        monkeypatch=monkeypatch,
+    )
+
+    # Never trips: every 10th call succeeds and resets the counter, so all
+    # 25 entities get attempted despite mostly failing.
+    assert len(gdelt.calls) == 25
+
+
+def test_gnews_circuit_breaker_aborts_after_consecutive_failures(monkeypatch):
+    entities = [_entity(f"g{i}", f"Game {i}") for i in range(30)]
+    gnews = _FakeGnewsSource(raises=True)
+
+    _run(
+        entities=entities,
+        gnews_source=gnews,
+        resolve_fn=_never_match,  # nothing covered → all 30 are "thin"
+        monkeypatch=monkeypatch,
+    )
+
+    assert len(gnews.calls) == news_worker._CONSECUTIVE_FAILURE_LIMIT

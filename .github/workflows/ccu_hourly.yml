@@ -2,7 +2,7 @@ name: ccu-hourly-snapshot
 
 on:
   schedule:
-    - cron: "0 * * * *"   # hourly, on the hour
+    - cron: "17 * * * *"  # hourly, offset from :00 to reduce GitHub's top-of-hour scheduling contention
   workflow_dispatch: {}      # manual trigger from the Actions tab
 
 jobs:

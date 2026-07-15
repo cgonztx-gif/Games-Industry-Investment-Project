@@ -25,6 +25,19 @@ from agents.workers.news.gdelt_client import CachedGdeltSource, GdeltBlocked, Gd
 from agents.workers.news.google_news_client import CachedGoogleNewsSource, GoogleNewsSource
 from agents.workers.news.rss_client import CachedRssSource, fetch_curated_feeds
 
+# Consecutive-failure circuit breaker for the per-entity GDELT/Google News
+# passes below. Both loops query one external API per watchlist entity
+# (~4,017 today); tiering the entity set was considered first (mirroring the
+# sentiment worker's tier_a/listing_only split) but rejected -- live data
+# showed 3,977/4,017 active watchlist rows are already tier_a, so it wouldn't
+# meaningfully shrink either loop. A sustained outage/throttling window (the
+# 2026-07-13 incident: ~5 hours of GDELT 429s/timeouts, run cancelled before
+# finishing) instead needs a hard stop: abort the remaining pass once this
+# many *consecutive* calls fail, rather than paying full per-entity retry
+# cost across the whole watchlist. Isolated failures (a handful of
+# entities with no real coverage) don't trip it.
+_CONSECUTIVE_FAILURE_LIMIT = 10
+
 
 def _dedupe_by_url(articles: list[dict]) -> list[dict]:
     seen: dict[str, dict] = {}
@@ -66,11 +79,22 @@ def run() -> dict:
 
     articles: list[dict] = list(fetch_curated_feeds(rss_source))
 
-    for entity in entities:
+    consecutive_gdelt_failures = 0
+    for i, entity in enumerate(entities):
         try:
             articles.extend(gdelt_source.search(_gdelt_query_for_entity(entity)))
+            consecutive_gdelt_failures = 0
         except GdeltBlocked as exc:
             print(f"[news] GDELT blocked for {entity['title']!r}: {exc}")
+            consecutive_gdelt_failures += 1
+            if consecutive_gdelt_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                skipped = len(entities) - i - 1
+                print(
+                    f"[news] GDELT: {consecutive_gdelt_failures} consecutive failures, "
+                    f"aborting remaining GDELT pass ({i + 1}/{len(entities)} attempted, "
+                    f"{skipped} skipped)"
+                )
+                break
 
     unique_articles = _dedupe_by_url(articles)
 
@@ -85,13 +109,28 @@ def run() -> dict:
         for game_id in matched:
             coverage_counts[game_id] = coverage_counts.get(game_id, 0) + 1
 
-    # Backfill entities GDELT + curated RSS didn't surface anything for.
+    # Backfill entities GDELT + curated RSS didn't surface anything for. When
+    # the GDELT pass above circuit-breaks early, most entities never got a
+    # GDELT query at all and will show zero coverage here too -- so this loop
+    # needs the same consecutive-failure circuit breaker, or an outage just
+    # relocates from GDELT to Google News instead of being bounded.
     thin_entities = [e for e in entities if coverage_counts.get(e["game_id"], 0) < 1]
-    for entity in thin_entities:
+    consecutive_gnews_failures = 0
+    for i, entity in enumerate(thin_entities):
         try:
             extra_articles = gnews_source.search(entity["title"])
+            consecutive_gnews_failures = 0
         except Exception as exc:
             print(f"[news] Google News fallback failed for {entity['title']!r}: {exc}")
+            consecutive_gnews_failures += 1
+            if consecutive_gnews_failures >= _CONSECUTIVE_FAILURE_LIMIT:
+                skipped = len(thin_entities) - i - 1
+                print(
+                    f"[news] Google News: {consecutive_gnews_failures} consecutive failures, "
+                    f"aborting remaining fallback pass ({i + 1}/{len(thin_entities)} attempted, "
+                    f"{skipped} skipped)"
+                )
+                break
             continue
         for article in _dedupe_by_url(extra_articles):
             matched = resolve_matched_entities(article, [entity], disambig_cache)
