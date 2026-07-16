@@ -10,6 +10,38 @@ def get_client() -> Client:
     return create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 
+_MAX_ROWS_PER_REQUEST = 1000
+
+
+def _fetch_all_rows(query_fn) -> list[dict]:
+    """
+    Page a Supabase/PostgREST query via .range() until a short page signals the
+    end, instead of a single unranged .select() -- Supabase's hosted PostgREST
+    caps any single request at 1000 rows regardless of the table's real size
+    (the same class of bug the dashboard fixed with fetchAllRows(), see
+    dashboard/src/lib/supabase/paginate.ts). watchlist/games sit at ~4,017 rows
+    and player_metrics/sentiment_snapshots can each exceed 1000 rows on a
+    single day once most of the watchlist is tier_a, so every query that scans
+    one of those tables without an ``.eq(...)``-bounded small result set must
+    go through this helper.
+
+    ``query_fn`` must return a *fresh*, unexecuted query builder each call
+    (e.g. ``lambda: client.table(...).select(...).eq(...)``) -- a single
+    builder object can't be re-ranged after ``.execute()`` runs.
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            query_fn().range(offset, offset + _MAX_ROWS_PER_REQUEST - 1).execute().data or []
+        )
+        rows.extend(page)
+        if len(page) < _MAX_ROWS_PER_REQUEST:
+            break
+        offset += _MAX_ROWS_PER_REQUEST
+    return rows
+
+
 def find_or_create_studio(client: Client, studio: dict) -> str:
     """Return studio_id, creating the row if it doesn't exist yet."""
     resp = (
@@ -122,13 +154,10 @@ def insert_watchlist_entry(
 
 def get_seeded_game_ids(client: Client) -> set[str]:
     """Return game_ids already in watchlist with added_by='seed' (idempotency check)."""
-    resp = (
-        client.table("watchlist")
-        .select("game_id")
-        .eq("added_by", "seed")
-        .execute()
+    rows = _fetch_all_rows(
+        lambda: client.table("watchlist").select("game_id").eq("added_by", "seed")
     )
-    return {row["game_id"] for row in resp.data}
+    return {row["game_id"] for row in rows}
 
 
 def get_seeded_external_ids(client: Client) -> dict[str, set[str]]:
@@ -137,15 +166,12 @@ def get_seeded_external_ids(client: Client) -> dict[str, set[str]]:
     Used for O(1) early-skip in the seed loop — avoids any Supabase calls for
     games we've already processed, preventing HTTP/2 stream exhaustion on re-runs.
     """
-    resp = (
-        client.table("watchlist")
-        .select("games(igdb_id, steam_app_id)")
-        .eq("added_by", "seed")
-        .execute()
+    rows = _fetch_all_rows(
+        lambda: client.table("watchlist").select("games(igdb_id, steam_app_id)").eq("added_by", "seed")
     )
     igdb_ids: set[str] = set()
     steam_ids: set[str] = set()
-    for row in resp.data:
+    for row in rows:
         game = row.get("games") or {}
         if game.get("igdb_id"):
             igdb_ids.add(game["igdb_id"])
@@ -160,17 +186,16 @@ def get_seeded_external_ids(client: Client) -> dict[str, set[str]]:
 
 def get_watchlist_games(client: Client) -> list[dict]:
     """Return all active watchlist games joined with their games row."""
-    resp = (
-        client.table("watchlist")
+    rows = _fetch_all_rows(
+        lambda: client.table("watchlist")
         .select(
             "id, game_id, sentiment_tier, subreddit, "
             "games(game_id, title, steam_app_id, igdb_id, genre, release_date, is_live_service)"
         )
         .eq("active", True)
-        .execute()
     )
     result = []
-    for row in resp.data:
+    for row in rows:
         game = row.get("games")
         if game:
             result.append(
@@ -244,15 +269,14 @@ def get_watchlist_tickers(client: Client) -> list[dict]:
     so callers can pull per-game/per-studio signals for a composite health score
     without a second round trip.
     """
-    resp = (
-        client.table("watchlist")
+    rows = _fetch_all_rows(
+        lambda: client.table("watchlist")
         .select("ticker, studio_id, game_id")
         .not_.is_("ticker", "null")
         .eq("active", True)
-        .execute()
     )
     grouped: dict[str, dict] = {}
-    for row in resp.data:
+    for row in rows:
         t = row["ticker"]
         studio_id = row.get("studio_id")
         game_id = row.get("game_id")
@@ -434,17 +458,16 @@ def get_watchlist_entities_with_aliases(client: Client) -> list[dict]:
     Return all active watchlist games joined with alias/ambiguity columns and
     studio name, for news-relevance matching (agents/workers/news/entity_matcher.py).
     """
-    resp = (
-        client.table("watchlist")
+    rows = _fetch_all_rows(
+        lambda: client.table("watchlist")
         .select(
             "id, game_id, "
             "games(game_id, title, aliases, title_is_ambiguous, studios(name))"
         )
         .eq("active", True)
-        .execute()
     )
     result = []
-    for row in resp.data:
+    for row in rows:
         game = row.get("games")
         if not game:
             continue
@@ -576,43 +599,36 @@ def write_patch_event(client: Client, event: dict) -> bool:
 # ---------------------------------------------------------------------------
 
 def get_weekly_outputs(client: Client, run_date: str, week_start: str) -> dict:
-    """Read same-week worker outputs for synthesis."""
-    player_metrics = (
-        client.table("player_metrics")
-        .select("*")
-        .eq("date", run_date)
-        .execute()
-        .data
+    """
+    Read same-week worker outputs for synthesis.
+
+    Paginated via _fetch_all_rows -- player_metrics and sentiment_snapshots
+    are filtered to a single day here, but with ~4,017 active watchlist rows
+    and sentiment_snapshots writing up to 4 rows/game/day (reddit/steam/
+    youtube/news), either can plausibly exceed PostgREST's 1000-row cap on a
+    single day once most of the watchlist is tier_a; an unranged query would
+    silently truncate the briefing's input instead of raising.
+    """
+    player_metrics = _fetch_all_rows(
+        lambda: client.table("player_metrics").select("*").eq("date", run_date)
     )
-    sentiment = (
-        client.table("sentiment_snapshots")
-        .select("*")
-        .eq("date", run_date)
-        .execute()
-        .data
+    sentiment = _fetch_all_rows(
+        lambda: client.table("sentiment_snapshots").select("*").eq("date", run_date)
     )
-    patch_events = (
-        client.table("patch_events")
+    patch_events = _fetch_all_rows(
+        lambda: client.table("patch_events")
         .select("*")
         .gte("date", week_start)
         .lte("date", run_date)
-        .execute()
-        .data
     )
-    studio_signals = (
-        client.table("studio_signals")
+    studio_signals = _fetch_all_rows(
+        lambda: client.table("studio_signals")
         .select("*")
         .gte("date", week_start)
         .lte("date", run_date)
-        .execute()
-        .data
     )
-    equity_signals = (
-        client.table("equity_signals")
-        .select("*")
-        .eq("date", run_date)
-        .execute()
-        .data
+    equity_signals = _fetch_all_rows(
+        lambda: client.table("equity_signals").select("*").eq("date", run_date)
     )
     return {
         "player_metrics": player_metrics or [],
@@ -784,15 +800,12 @@ def get_active_watchlist_external_ids(client: Client) -> dict[str, set[str]]:
     idempotency), Discovery needs to exclude anything already actively tracked
     no matter how it got there.
     """
-    resp = (
-        client.table("watchlist")
-        .select("games(igdb_id, steam_app_id)")
-        .eq("active", True)
-        .execute()
+    rows = _fetch_all_rows(
+        lambda: client.table("watchlist").select("games(igdb_id, steam_app_id)").eq("active", True)
     )
     igdb_ids: set[str] = set()
     steam_ids: set[str] = set()
-    for row in resp.data:
+    for row in rows:
         game = row.get("games") or {}
         if game.get("igdb_id"):
             igdb_ids.add(game["igdb_id"])
@@ -803,14 +816,11 @@ def get_active_watchlist_external_ids(client: Client) -> dict[str, set[str]]:
 
 def get_tracked_game_counts_by_studio(client: Client) -> dict[str, int]:
     """Count of active watchlist games per studio_id, for the uniqueness score component."""
-    resp = (
-        client.table("watchlist")
-        .select("studio_id")
-        .eq("active", True)
-        .execute()
+    rows = _fetch_all_rows(
+        lambda: client.table("watchlist").select("studio_id").eq("active", True)
     )
     counts: dict[str, int] = {}
-    for row in resp.data:
+    for row in rows:
         studio_id = row.get("studio_id")
         if studio_id:
             counts[studio_id] = counts.get(studio_id, 0) + 1

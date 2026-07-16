@@ -15,6 +15,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from database.db_client import (
+    _fetch_all_rows,
+    _MAX_ROWS_PER_REQUEST,
     find_or_create_game,
     find_or_create_studio,
     get_active_watchlist_external_ids,
@@ -22,6 +24,7 @@ from database.db_client import (
     get_existing_proposal_status,
     get_studios_with_tickers,
     get_tracked_game_counts_by_studio,
+    get_watchlist_games,
     write_ccu_snapshots_batch,
     write_news_item,
     write_watchlist_proposal,
@@ -64,6 +67,7 @@ class _Query:
         self._order_col = None
         self._order_desc = False
         self._limit_n = None
+        self._range = None
 
     @property
     def not_(self):
@@ -105,6 +109,10 @@ class _Query:
         self._limit_n = n
         return self
 
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
     def execute(self):
         if self._is_insert:
             inserted = []
@@ -130,6 +138,9 @@ class _Query:
         rows = [r for r in self._rows if self._matches(r)]
         if self._order_col:
             rows.sort(key=lambda r: r.get(self._order_col) or "", reverse=self._order_desc)
+        if self._range is not None:
+            start, end = self._range
+            rows = rows[start : end + 1]
         if self._limit_n is not None:
             rows = rows[: self._limit_n]
         return _Result(data=rows)
@@ -290,6 +301,61 @@ def test_get_studios_with_tickers_deduplicates_by_ticker():
     results = get_studios_with_tickers(db)
     tickers = [r["ticker"] for r in results]
     assert tickers.count("SAME") == 1
+
+
+# ---------------------------------------------------------------------------
+# _fetch_all_rows pagination — regression test for the PostgREST 1000-row
+# cap bug (same class the dashboard fixed with fetchAllRows(), see
+# dashboard/src/lib/supabase/paginate.ts). A single unranged .select() call
+# on watchlist/games/player_metrics/sentiment_snapshots would silently
+# truncate at 1000 rows in production (watchlist/games sit at ~4,017 rows);
+# _fetch_all_rows() pages via .range() until a short page signals the end.
+# ---------------------------------------------------------------------------
+
+def test__fetch_all_rows_pages_past_single_request_cap(monkeypatch):
+    import database.db_client as db_client_module
+
+    monkeypatch.setattr(db_client_module, "_MAX_ROWS_PER_REQUEST", 3)
+
+    db = _FakeClient()
+    db.seed("games", [{"game_id": f"g{i}"} for i in range(7)])
+
+    rows = _fetch_all_rows(lambda: db.table("games").select("game_id"))
+
+    assert len(rows) == 7
+    assert {r["game_id"] for r in rows} == {f"g{i}" for i in range(7)}
+
+
+def test_get_watchlist_games_returns_rows_beyond_a_single_page(monkeypatch):
+    """
+    get_watchlist_games is read by market_player, patch_notes, and sentiment
+    workers -- if it silently capped at 1000 rows against a ~4,017-row
+    production watchlist, most of the watchlist would never be processed by
+    any worker with zero visible error. Simulate that cap at a small size so
+    the test stays fast.
+    """
+    import database.db_client as db_client_module
+
+    monkeypatch.setattr(db_client_module, "_MAX_ROWS_PER_REQUEST", 2)
+
+    db = _FakeClient()
+    db.seed(
+        "watchlist",
+        [
+            {
+                "id": f"w{i}",
+                "game_id": f"g{i}",
+                "active": True,
+                "games": {"game_id": f"g{i}", "title": f"Game {i}"},
+            }
+            for i in range(5)
+        ],
+    )
+
+    result = get_watchlist_games(db)
+
+    assert len(result) == 5
+    assert {r["game_id"] for r in result} == {f"g{i}" for i in range(5)}
 
 
 # ---------------------------------------------------------------------------

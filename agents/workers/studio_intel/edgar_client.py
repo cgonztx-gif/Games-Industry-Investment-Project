@@ -17,10 +17,26 @@ _HEADERS = {"User-Agent": "games-investment-platform cgonztx@gmail.com"}
 _cik_map: dict[str, int] = {}
 
 # 8-K item prefix → (signal_type, severity)
+#
+# "2.05" (layoffs) is deliberately "medium", not "high": org-health-signal-
+# analysis SKILL.md's Distress Indicators table grades a single layoffs
+# filing "Low to medium" (under 5%/role-limited) up to "High" only for
+# "above 15%, studio closure, or repeated rounds" -- an 8-K item code alone
+# carries no headcount/magnitude, so "medium" is the correct
+# no-magnitude-known default, and it's what makes
+# escalate_for_repeat_distress() below reachable at all. It was previously
+# "high" here, which made every layoffs filing start at the escalation
+# ceiling -- escalate_for_repeat_distress()'s `if severity == "high": return
+# severity, None` guard then always short-circuited, so a studio's 2nd/3rd
+# consecutive layoffs round could never actually escalate and
+# distress_escalations stayed permanently 0 in every run. "2.06"
+# (impairment) stays "high" -- the same table grades "Going-concern,
+# impairment, or covenant language" unconditionally High with no graduated
+# tier, so there's nothing for a repeat occurrence to escalate to.
 _ITEM_MAP: dict[str, tuple[str, str]] = {
     "1.01": ("press_release", "low"),
     "2.01": ("acquisition", "high"),
-    "2.05": ("layoffs", "high"),
+    "2.05": ("layoffs", "medium"),
     "2.06": ("impairment", "high"),
     "5.01": ("acquisition", "high"),
     "5.02": ("exec_departure", "medium"),

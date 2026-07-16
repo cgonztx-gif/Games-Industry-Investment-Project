@@ -217,12 +217,25 @@ def fetch_youtube_comments(
             return fresh
 
     try:
+        global_ids = (
+            _candidate_videos(api_key, game_title, global_playlists) if global_playlists else []
+        )
+        trusted_ids = (
+            _trusted_candidate_videos(api_key, game_playlists, max_videos) if game_playlists else []
+        )
+        # Same crowding-out failure mode the 2026-07-12 fix closed WITHIN
+        # _trusted_candidate_videos, one level up: concatenating global_ids
+        # before trusted_ids and then truncating to max_videos let the global
+        # outlet playlists (title-filtered, so they fire whenever an outlet
+        # happens to cover this game) fill the entire cap before any
+        # per-game-curated community video was ever considered. Interleave
+        # the two sources round-robin instead of letting list order decide.
         video_ids: list[str] = []
-        if global_playlists:
-            video_ids.extend(_candidate_videos(api_key, game_title, global_playlists))
-        if game_playlists:
-            for video_id in _trusted_candidate_videos(api_key, game_playlists, max_videos):
-                if video_id not in video_ids:
+        seen: set[str] = set()
+        for pair in itertools.zip_longest(global_ids, trusted_ids):
+            for video_id in pair:
+                if video_id and video_id not in seen:
+                    seen.add(video_id)
                     video_ids.append(video_id)
         video_ids = video_ids[:max_videos]
 

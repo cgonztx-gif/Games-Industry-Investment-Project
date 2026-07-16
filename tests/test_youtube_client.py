@@ -272,6 +272,46 @@ def test_fetch_youtube_comments_interleaves_multiple_trusted_playlists(monkeypat
     assert comments[0]["video_id"] == "community1"
 
 
+def test_fetch_youtube_comments_interleaves_global_and_trusted_playlists(monkeypatch):
+    """
+    Regression test for a bug adjacent to the 2026-07-12 trusted-playlist
+    interleaving fix: the *outer* combine step in fetch_youtube_comments()
+    still concatenated global-playlist candidates before trusted (per-game
+    curated) candidates and then truncated to max_videos. A game with any
+    global-outlet coverage at all (title-filtered, so common) crowded out
+    every per-game community creator video, even though the whole point of
+    GAME_YOUTUBE_PLAYLISTS is to guarantee community coverage the global
+    outlet list misses.
+    """
+    monkeypatch.setenv("YOUTUBE_API_KEY", "key")
+    monkeypatch.setenv("YOUTUBE_UPLOAD_PLAYLISTS", "UUglobal")
+
+    fake_get = _make_fake_get(
+        playlist_items={
+            "UUglobal": [
+                {"title": "Fortnite Recap 1", "description": "", "videoId": "global1"},
+                {"title": "Fortnite Recap 2", "description": "", "videoId": "global2"},
+            ],
+            "UUcommunity": [
+                {"title": "community stream", "description": "", "videoId": "community1"},
+            ],
+        },
+        comment_threads={
+            "global1": [{"text": "from official", "likeCount": 1}],
+            "global2": [{"text": "from official 2", "likeCount": 1}],
+            "community1": [{"text": "from community", "likeCount": 1}],
+        },
+    )
+    monkeypatch.setattr(youtube_client.requests, "get", fake_get)
+    monkeypatch.setattr(youtube_client.time, "sleep", lambda *_: None)
+
+    comments = youtube_client.fetch_youtube_comments(
+        "Fortnite", max_videos=2, game_playlist_ids=["UUcommunity"]
+    )
+    video_ids = {c["video_id"] for c in comments}
+    assert "community1" in video_ids
+
+
 def test_fetch_youtube_comments_uses_cache(monkeypatch):
     monkeypatch.setenv("YOUTUBE_API_KEY", "key")
     monkeypatch.setenv("YOUTUBE_UPLOAD_PLAYLISTS", "UUglobal")
