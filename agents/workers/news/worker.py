@@ -14,6 +14,8 @@ Prerequisites:
   - database/migrations/008_news_items.sql
 """
 
+import time
+
 from database.api_cache import SupabaseApiCache
 from database.db_client import (
     get_client,
@@ -42,12 +44,28 @@ from agents.workers.news.rss_client import CachedRssSource, fetch_curated_feeds
 # looks like a success here and resets the loop counter, even though the live
 # call failed and paid its full retry cost first (confirmed live in CI run
 # 29438324984, 2026-07-15: 317 exhausted-retry cycles interleaved with 196
-# stale serves, ~6h, loop breaker never tripped). The authoritative cost
-# bound is therefore inside CachedGdeltSource/CachedGoogleNewsSource, which
-# count consecutive *live-call* failures before any stale rescue and stop
-# calling the network entirely once tripped; the loop breakers remain as a
-# secondary guard for the no-cache case.
+# stale serves, ~6h, loop breaker never tripped). The source-level breakers
+# inside CachedGdeltSource/CachedGoogleNewsSource count consecutive
+# *live-call* failures before any stale rescue and stop calling the network
+# entirely once tripped; the loop breakers remain as a secondary guard for
+# the no-cache case. Both are streak-based, so neither bounds a slow bleed
+# where successes interleave with expensive failures -- that is what the
+# _PASS_TIME_BUDGET_SECONDS wall-clock budget below is for.
 _CONSECUTIVE_FAILURE_LIMIT = 10
+
+# Wall-clock budget per per-entity pass (GDELT loop, Google News fallback
+# loop) -- the authoritative bound on how long either pass may run. CI run
+# 29516590262 (2026-07-16) proved the consecutive-failure breakers above do
+# not bound the phase under GDELT's *real* failure mode: the job died at
+# GitHub's 6-hour cap with zero breaker trips -- 1,037 throttled 429s and 395
+# entities exhausting retries, but successes interleaved often enough that
+# the consecutive-live-failure streak kept resetting. That's a slow bleed
+# (~45s per failed entity), not a total outage, and no streak-based counter
+# can bound it. A time budget can: once a pass has consumed its budget, the
+# remainder is aborted the same way the breakers abort, and the run moves on
+# with whatever coverage exists. The breakers stay unchanged as the fast path
+# for genuine total outages (they trip in ~minutes; the budget takes 90).
+_PASS_TIME_BUDGET_SECONDS = 5400  # 90 min
 
 
 def _dedupe_by_url(articles: list[dict]) -> list[dict]:
@@ -77,7 +95,7 @@ def _write_matched_article(db, article: dict, matched: list[str]) -> None:
     )
 
 
-def run() -> dict:
+def run(now_fn=time.monotonic) -> dict:
     db = get_client()
     entities = get_watchlist_entities_with_aliases(db)
 
@@ -97,7 +115,16 @@ def run() -> dict:
     articles: list[dict] = list(fetch_curated_feeds(rss_source))
 
     consecutive_gdelt_failures = 0
+    gdelt_pass_start = now_fn()
     for i, entity in enumerate(entities):
+        if now_fn() - gdelt_pass_start > _PASS_TIME_BUDGET_SECONDS:
+            skipped = len(entities) - i
+            print(
+                f"[news] GDELT: time budget ({_PASS_TIME_BUDGET_SECONDS}s) exceeded, "
+                f"aborting remaining GDELT pass ({i}/{len(entities)} attempted, "
+                f"{skipped} skipped)"
+            )
+            break
         try:
             articles.extend(gdelt_source.search(_gdelt_query_for_entity(entity)))
             consecutive_gdelt_failures = 0
@@ -133,7 +160,16 @@ def run() -> dict:
     # relocates from GDELT to Google News instead of being bounded.
     thin_entities = [e for e in entities if coverage_counts.get(e["game_id"], 0) < 1]
     consecutive_gnews_failures = 0
+    gnews_pass_start = now_fn()
     for i, entity in enumerate(thin_entities):
+        if now_fn() - gnews_pass_start > _PASS_TIME_BUDGET_SECONDS:
+            skipped = len(thin_entities) - i
+            print(
+                f"[news] Google News: time budget ({_PASS_TIME_BUDGET_SECONDS}s) exceeded, "
+                f"aborting remaining fallback pass ({i}/{len(thin_entities)} attempted, "
+                f"{skipped} skipped)"
+            )
+            break
         try:
             extra_articles = gnews_source.search(entity["title"])
             consecutive_gnews_failures = 0

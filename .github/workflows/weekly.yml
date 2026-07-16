@@ -57,8 +57,14 @@ env:
   ALPACA_BASE_URL:      ${{ secrets.ALPACA_BASE_URL }}
 
 jobs:
+  # timeout-minutes on every job: a job killed by GitHub's 6-hour hard cap
+  # gets conclusion `cancelled`, which poisons the downstream `!cancelled()`
+  # conditions and skips every later phase; a job that exceeds
+  # timeout-minutes gets conclusion `failure`, which the chain is designed
+  # to tolerate (later phases still run). 350 min leaves margin under the cap.
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.phase == 'all' || inputs.phase == 'collect' }}
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +79,7 @@ jobs:
 
   news:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     needs: collect
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.phase == 'all' || inputs.phase == 'news') }}
     steps:
@@ -88,6 +95,7 @@ jobs:
 
   sentiment:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     needs: news
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.phase == 'all' || inputs.phase == 'sentiment') }}
     steps:
@@ -103,6 +111,7 @@ jobs:
 
   synthesize:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     needs: sentiment
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.phase == 'all' || inputs.phase == 'synthesize') }}
     steps:

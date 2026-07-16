@@ -92,6 +92,7 @@ def _run(
     resolve_fn=None,
     written=None,
     monkeypatch=None,
+    now_fn=None,
 ):
     if entities is None:
         entities = [_entity()]
@@ -127,6 +128,8 @@ def _run(
 
     monkeypatch.setattr(news_worker, "_write_matched_article", _fake_write)
 
+    if now_fn is not None:
+        return news_worker.run(now_fn=now_fn)
     return news_worker.run()
 
 
@@ -363,3 +366,115 @@ def test_gnews_circuit_breaker_aborts_after_consecutive_failures(monkeypatch):
     )
 
     assert len(gnews.calls) == news_worker._CONSECUTIVE_FAILURE_LIMIT
+
+
+# ---------------------------------------------------------------------------
+# Wall-clock time budget — CI run 29516590262 (2026-07-16) proved the
+# consecutive-failure breakers don't bound GDELT's real failure mode: a slow
+# bleed (~45s per throttled entity) with successes interleaved often enough
+# to keep resetting the streak. The job died at GitHub's 6-hour cap with zero
+# breaker trips. Each per-entity pass now carries an independent
+# _PASS_TIME_BUDGET_SECONDS budget measured via the injectable now_fn; no
+# real sleeping in these tests — fake sources advance a fake clock.
+# ---------------------------------------------------------------------------
+
+class _FakeClock:
+    """Manually-advanced monotonic clock; fake sources tick it per call so a
+    'slow' source consumes budget without any real sleeping."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def now(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
+
+
+class _SlowGdeltSource:
+    """Succeeds every call (so the streak breakers never trip — the exact
+    run-29516590262 shape) but burns `seconds_per_call` of fake wall clock."""
+
+    def __init__(self, clock, seconds_per_call):
+        self.clock = clock
+        self.seconds_per_call = seconds_per_call
+        self.calls = []
+
+    def search(self, query):
+        self.calls.append(query)
+        self.clock.advance(self.seconds_per_call)
+        return []
+
+
+class _SlowGnewsSource:
+    def __init__(self, clock, seconds_per_call):
+        self.clock = clock
+        self.seconds_per_call = seconds_per_call
+        self.calls = []
+
+    def search(self, query):
+        self.calls.append(query)
+        self.clock.advance(self.seconds_per_call)
+        return []
+
+
+def test_gdelt_time_budget_aborts_mid_pass(monkeypatch):
+    clock = _FakeClock()
+    entities = [_entity(f"g{i}", f"Game {i}") for i in range(30)]
+    # 2000s per entity, all "successful" — the streak breaker never fires,
+    # but the budget (5400s) is consumed after the 3rd call, so the 4th
+    # iteration's pre-check aborts and entities 4..30 are never attempted.
+    gdelt = _SlowGdeltSource(clock, seconds_per_call=2000)
+    gnews = _FakeGnewsSource()
+
+    _run(
+        entities=entities,
+        gdelt_source=gdelt,
+        gnews_source=gnews,
+        monkeypatch=monkeypatch,
+        now_fn=clock.now,
+    )
+
+    assert len(gdelt.calls) == 3
+    # The run continues past the abort: the Google News fallback pass still
+    # runs (with its own budget starting from its own pass start).
+    assert len(gnews.calls) > 0
+
+
+def test_pass_under_budget_is_unaffected(monkeypatch):
+    clock = _FakeClock()
+    entities = [_entity(f"g{i}", f"Game {i}") for i in range(30)]
+    # 10s per entity: 30 entities = 300s, comfortably under 5400s.
+    gdelt = _SlowGdeltSource(clock, seconds_per_call=10)
+
+    _run(
+        entities=entities,
+        gdelt_source=gdelt,
+        monkeypatch=monkeypatch,
+        now_fn=clock.now,
+    )
+
+    assert len(gdelt.calls) == 30
+
+
+def test_gnews_time_budget_is_independent_of_gdelt_pass(monkeypatch):
+    clock = _FakeClock()
+    entities = [_entity(f"g{i}", f"Game {i}") for i in range(30)]
+    # GDELT pass is fast (finishes all 30 well under budget); the Google News
+    # fallback is the slow one. Its budget must start at its own pass start —
+    # not at the GDELT pass start — and abort independently after 3 calls.
+    gdelt = _SlowGdeltSource(clock, seconds_per_call=10)
+    gnews = _SlowGnewsSource(clock, seconds_per_call=2000)
+
+    _run(
+        entities=entities,
+        gdelt_source=gdelt,
+        gnews_source=gnews,
+        resolve_fn=_never_match,  # nothing covered → all 30 are "thin"
+        monkeypatch=monkeypatch,
+        now_fn=clock.now,
+    )
+
+    assert len(gdelt.calls) == 30  # unaffected by the gnews slowness
+    assert len(gnews.calls) == 3   # own budget, own pass start
