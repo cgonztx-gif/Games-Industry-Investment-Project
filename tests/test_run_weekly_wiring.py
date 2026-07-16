@@ -54,13 +54,18 @@ def _install_fake_crewai(monkeypatch, kickoff_fn):
     monkeypatch.setitem(sys.modules, "crewai", fake)
 
 
-def _run_weekly(monkeypatch, kickoff_fn, call_order: list[str]):
+def _run_weekly(monkeypatch, kickoff_fn, call_order: list[str], argv: list[str] | None = None):
     """
     Pre-import and monkeypatch every worker/agent entrypoint on its own module
     object, then execute run_weekly.py via runpy. Its `from X import Y as Z`
     statements resolve against the already-imported (and now-patched) modules
     in sys.modules, so the patches take effect inside the executed script.
+
+    sys.argv must be replaced: runpy executes with the real process argv,
+    which under pytest holds pytest's own arguments -- run_weekly.py's
+    argparse would reject them with SystemExit(2).
     """
+    monkeypatch.setattr(sys, "argv", ["run_weekly.py", *(argv or [])])
     _install_fake_crewai(monkeypatch, kickoff_fn)
 
     import agents.orchestrator.crew as crew_module  # noqa: F401 -- built against the fake crewai
@@ -189,3 +194,66 @@ def test_crewai_placeholder_failure_does_not_crash_the_run(monkeypatch):
     # The run reached and attempted the crew step (it's last), and did not
     # raise out of runpy.run_path despite the kickoff failure.
     assert call_order == _EXPECTED_ORDER
+
+
+# ---------------------------------------------------------------------------
+# --phase selection (one GitHub Actions job per phase; see weekly.yml)
+# ---------------------------------------------------------------------------
+
+_PHASE_EXPECTED = {
+    "collect": ["market_player", "financial_overlay", "studio_intel", "patch_notes"],
+    "news": ["news"],
+    "sentiment": ["sentiment"],
+    "synthesize": [
+        "discovery",
+        "synthesis",
+        "portfolio_manager",
+        "execution_agent",
+        "returns_tracker",
+        "crew_kickoff",
+    ],
+}
+
+
+@pytest.mark.parametrize("phase", list(_PHASE_EXPECTED))
+def test_phase_flag_runs_exactly_that_phases_steps_in_order(monkeypatch, phase):
+    call_order: list[str] = []
+
+    _run_weekly(
+        monkeypatch, kickoff_fn=lambda: "crew ok", call_order=call_order, argv=["--phase", phase]
+    )
+
+    assert call_order == _PHASE_EXPECTED[phase]
+
+
+def test_phases_concatenated_cover_the_full_documented_order():
+    # Guards against a step being dropped from every phase: running the four
+    # phases back-to-back must be exactly the full no-args pipeline.
+    concatenated = [
+        step
+        for phase in ["collect", "news", "sentiment", "synthesize"]
+        for step in _PHASE_EXPECTED[phase]
+    ]
+    assert concatenated == _EXPECTED_ORDER
+
+
+def test_unknown_phase_exits_without_calling_any_worker(monkeypatch):
+    call_order: list[str] = []
+
+    with pytest.raises(SystemExit):
+        _run_weekly(
+            monkeypatch, kickoff_fn=lambda: "crew ok", call_order=call_order, argv=["--phase", "bogus"]
+        )
+
+    assert call_order == []
+
+
+def test_crewai_failure_is_non_fatal_in_the_synthesize_phase_too(monkeypatch):
+    call_order: list[str] = []
+
+    def _boom():
+        raise RuntimeError("CrewAI blew up")
+
+    _run_weekly(monkeypatch, kickoff_fn=_boom, call_order=call_order, argv=["--phase", "synthesize"])
+
+    assert call_order == _PHASE_EXPECTED["synthesize"]
