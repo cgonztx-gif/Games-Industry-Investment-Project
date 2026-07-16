@@ -210,7 +210,7 @@ class JsonRedditSource:
 Wraps any source. On a normal run it prevents re-fetching; on a block it serves
 last-known-good rather than returning empty. This is where the resilience lives.
 
-**Serialization boundary (canonical — matches the SupabaseRedditCache doc §4):**
+**Serialization boundary (canonical — matches the SupabaseApiCache doc §4):**
 the cache stores JSON-native `list[dict]` payloads and knows nothing about the
 dataclasses; *this wrapper* owns the dataclass ↔ dict conversion on both sides.
 That keeps the cache generic (reusable for yfinance, Steam reviews, or any other
@@ -221,7 +221,7 @@ from dataclasses import asdict
 from typing import Protocol
 
 class RedditCache(Protocol):
-    # backed by the generic api_cache table — see the SupabaseRedditCache design doc
+    # backed by the generic api_cache table — see the SupabaseApiCache design doc
     def get(self, key: str, max_age_hours: float | None = None) -> list | None: ...
     def set(self, key: str, value: list) -> None: ...
 
@@ -302,6 +302,24 @@ class OAuthRedditSource:
     # parsers as JsonRedditSource -- see reddit_source.py for the full implementation.
 
 
+class NullRedditSource:
+    """Returned instead of building any leaf when REDDIT_SOURCE_PAUSED is set (any of
+    "1"/"true"/"yes"). Every call raises RedditBlocked immediately, zero network I/O --
+    callers already treat RedditBlocked as a normal degrade-gracefully signal, so this
+    needs no changes in worker.py or discovery/worker.py. Added 2026-07-09: a deliberate
+    scope pause, not a bug fix -- the unauthenticated path is a confirmed-permanent WAF
+    block (see the update below) and, before the ScrapeOps proxy was configured, no real
+    egress path existed yet, so every attempt was a guaranteed-failed request. Unset the
+    var (or set it to anything falsy) to resume."""
+    def fetch_posts(self, *args, **kwargs): raise RedditBlocked("Reddit source paused (REDDIT_SOURCE_PAUSED is set)")
+    def fetch_comments(self, *args, **kwargs): raise RedditBlocked("Reddit source paused (REDDIT_SOURCE_PAUSED is set)")
+    def resolve_subreddit(self, game_title): raise RedditBlocked("Reddit source paused (REDDIT_SOURCE_PAUSED is set)")
+
+
+def _reddit_source_paused() -> bool:
+    return os.environ.get("REDDIT_SOURCE_PAUSED", "").strip().lower() in ("1", "true", "yes")
+
+
 def _build_leaf_sources() -> list["RedditSource"]:
     """Priority: OAuth (all 3 vars required together) -> Proxy -> unauthenticated
     JsonRedditSource (always last, unconditional -- the sole active path when no
@@ -310,16 +328,21 @@ def _build_leaf_sources() -> list["RedditSource"]:
     if os.environ.get("REDDIT_CLIENT_ID") and os.environ.get("REDDIT_CLIENT_SECRET") and os.environ.get("REDDIT_REFRESH_TOKEN"):
         leaves.append(OAuthRedditSource(...))
     if os.environ.get("REDDIT_PROXY_URL"):
-        leaves.append(ProxiedJsonRedditSource(...))
+        insecure = os.environ.get("REDDIT_PROXY_INSECURE_SSL", "").strip().lower() in ("1", "true", "yes")
+        leaves.append(ProxiedJsonRedditSource(..., verify=not insecure))
     leaves.append(JsonRedditSource())
     return leaves
 
 
 def build_reddit_source(cache_factory: "Callable[[str], RedditCache]") -> "RedditSource":
-    """Each leaf gets its own api_cache namespace (reddit_oauth / reddit_proxy / reddit)
-    so one path's stale-serve can never mask another path's real health. Returns a bare
-    CachedRedditSource when only JsonRedditSource is active -- the exact pre-existing
-    object graph, unchanged -- else a FirstAvailableRedditSource of per-leaf wraps."""
+    """Returns NullRedditSource() with no leaves built at all when REDDIT_SOURCE_PAUSED
+    is set. Otherwise: each leaf gets its own api_cache namespace (reddit_oauth /
+    reddit_proxy / reddit) so one path's stale-serve can never mask another path's real
+    health. Returns a bare CachedRedditSource when only JsonRedditSource is active --
+    the exact pre-existing object graph, unchanged -- else a FirstAvailableRedditSource
+    of per-leaf wraps."""
+    if _reddit_source_paused():
+        return NullRedditSource()
     leaves = _build_leaf_sources()
     wrapped = [CachedRedditSource(leaf, cache_factory(_CACHE_NAMESPACE_BY_TYPE[type(leaf)]))
                for leaf in leaves]
@@ -327,18 +350,22 @@ def build_reddit_source(cache_factory: "Callable[[str], RedditCache]") -> "Reddi
 
 
 def build_subreddit_resolver() -> "SubredditResolver":
-    """Same priority chain, no cache wrap -- subreddit-name resolution results are
-    already cached separately by cached_resolve_subreddit()/lookup_cache in worker.py.
-    Fixes a real prior bug: worker.py used to instantiate a hardcoded JsonRedditSource()
-    for resolution, bypassing whatever fallback chain was configured."""
+    """Same REDDIT_SOURCE_PAUSED short-circuit and priority chain as build_reddit_source,
+    no cache wrap -- subreddit-name resolution results are already cached separately by
+    cached_resolve_subreddit()/lookup_cache in worker.py. Fixes a real prior bug:
+    worker.py used to instantiate a hardcoded JsonRedditSource() for resolution,
+    bypassing whatever fallback chain was configured."""
+    if _reddit_source_paused():
+        return NullRedditSource()
     leaves = _build_leaf_sources()
     return leaves[0] if len(leaves) == 1 else FirstAvailableRedditSource(leaves)
 ```
 
-All four new env vars (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_REFRESH_TOKEN`,
-`REDDIT_PROXY_URL`) are optional and gate this behavior; with none set, `build_reddit_source`
-returns a bare `CachedRedditSource(JsonRedditSource(), cache)` — bit-for-bit identical to
-the object graph before this change. `resolve_subreddit` also now flows through
+Six env vars gate this behavior, all optional: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`,
+`REDDIT_REFRESH_TOKEN`, `REDDIT_PROXY_URL`, `REDDIT_PROXY_INSECURE_SSL`, and
+`REDDIT_SOURCE_PAUSED`. With all six unset, `build_reddit_source` returns a bare
+`CachedRedditSource(JsonRedditSource(), cache)` — bit-for-bit identical to the object
+graph before any of this was added. `resolve_subreddit` also now flows through
 `build_subreddit_resolver()` rather than a hardcoded, ungated `JsonRedditSource()`.
 
 **Proxy soft-failure detection + connection-error retry, added 2026-07-13.** Live-testing
@@ -380,20 +407,21 @@ verification on by default.
 ## 7. Integration with the Sentiment Subagent (CrewAI at MVP)
 
 Expose the adapter as a thin tool; the agent never sees Reddit specifics. Note the
-cache is constructed with its Supabase credentials from the environment — it has
-required arguments (see the SupabaseRedditCache doc §3), so `SupabaseRedditCache()`
-with no args would fail.
+cache class is `SupabaseApiCache` (see the *SupabaseApiCache* doc §2-3, and its
+"renamed from `SupabaseRedditCache`" note) and `build_reddit_source` takes a
+`cache_factory` callable, not one pre-built cache instance, since the fallback chain
+needs a separate `api_cache` namespace per leaf.
 
 ```python
-import json, os
+import json
 from crewai.tools import tool
+from database.db_client import get_client
+from database.api_cache import SupabaseApiCache
 
-_cache = SupabaseRedditCache(
-    url=os.environ["SUPABASE_URL"],
-    service_key=os.environ["SUPABASE_SERVICE_KEY"],   # GitHub Actions secret
-    source="reddit",
+_db = get_client()                                    # SUPABASE_URL + SUPABASE_KEY
+_source = build_reddit_source(
+    cache_factory=lambda source: SupabaseApiCache(client=_db, source=source)
 )
-_source = build_reddit_source(cache=_cache)
 
 @tool("fetch_reddit_discussion")
 def fetch_reddit_discussion(subreddit: str, top_n_posts: int = 10) -> str:
@@ -416,13 +444,25 @@ do not. That containment is the point of the design.
 ## Operational notes
 
 **Request budget — tiered, not flat.** At ~8s/request + jitter you get ~6–7 req/min,
-safely under the ~10/min ceiling. The watchlist maps ~150–300 games to roughly ~60
-active subreddits, but not every sub earns comment fetches. Each game carries a
-**sentiment tier** assigned at seeding (see the brief): Tier A (~25 subs — highest
-portfolio materiality and activity) gets 1 listing call + comments for the top ~10
-posts (~11 calls/sub); the tail gets a listing call only. That's ~25×11 + ~35×1 ≈
-**310 calls ≈ 45 minutes** per weekly run — with a worst case of ~660 calls ≈ ~90
-minutes if every sub were promoted to Tier A. Either figure fits comfortably inside
+safely under the ~10/min ceiling. This math was originally sized against the brief's
+~150–300-game seeding target, mapped to roughly ~60 active subreddits, but not every
+sub earns comment fetches. Each game carries a **sentiment tier** assigned at seeding
+(see the brief): Tier A (~25 subs — highest portfolio materiality and activity) gets
+1 listing call + comments for the top ~10 posts (~11 calls/sub); the tail gets a
+listing call only. That's ~25×11 + ~35×1 ≈ **310 calls ≈ 45 minutes** per weekly run —
+with a worst case of ~660 calls ≈ ~90 minutes if every sub were promoted to Tier A.
+
+> **Live scale is far beyond this math's assumptions.** The watchlist grew to
+> ~4,017 active games (RAWG catalog backfill, not just the original curated seed —
+> see the brief's Watchlist Management System section), and per CLAUDE.md's "News
+> ingestion internals" section, **3,977 of those 4,017 rows are `tier_a`** — nearly
+> the entire watchlist, not the ~25-sub elite subset this budget assumed. The
+> ~310-call/45-minute figure above no longer reflects a real run at this scale; it's
+> the pre-growth reference case only. (Reddit collection has been paused via
+> `REDDIT_SOURCE_PAUSED` since 2026-07-09 regardless — see the "Confirmed, not
+> hypothetical" note below — so this hasn't yet been re-measured live at full scale.)
+
+Either figure fits comfortably inside
 GitHub Actions' 6-hour job limit; and because the repo is public (per the brief),
 Actions minutes are unmetered — on a private repo this one step would consume
 10–25% of the free plan's 2,000 monthly minutes. **r/gaming is deliberately
@@ -473,9 +513,10 @@ applied to session, inherits 403/429/soft-failure/connection-error handling unch
 `verify` default-True and override-False), `OAuthRedditSource` (token lifecycle,
 401/403/429 handling, no-`.json`-suffix + Bearer header, connection-error retry), and the
 `build_reddit_source`/`build_subreddit_resolver`/`_build_leaf_sources` factory —
-including the load-bearing proof that with all five new env vars unset, the returned
+including the load-bearing proof that with all six new env vars unset, the returned
 object graph is unchanged, plus `REDDIT_PROXY_INSECURE_SSL` toggling the proxy leaf's
-`session.verify`. Zero live network calls anywhere in the suite. Note: OAuth
+`session.verify` and `REDDIT_SOURCE_PAUSED` short-circuiting both factories to
+`NullRedditSource()`. Zero live network calls anywhere in the suite. Note: OAuth
 registration itself is a separate, manual, non-guaranteed Reddit approval process (no
 SLA as of the Nov 2025 policy) — the adapter code is *ready* to use OAuth the moment
 credentials exist, but is not *activated*, and this test suite cannot and does not

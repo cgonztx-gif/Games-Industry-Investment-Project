@@ -1,5 +1,7 @@
 # Decision Memo: Adding a News-Article Stream to the Sentiment Pipeline
 
+**Status: implemented 2026-07-08** — substantially as proposed below (GDELT + curated RSS + Google News fallback, `news_items` table, Stage-1/Stage-2 entity matching, stance/frame classification instead of VADER/ABSA/vocal-minority reuse). See CLAUDE.md's "News ingestion internals" and "Sentiment pipeline internals" sections for current behavior, including a 2026-07-15 fix (a consecutive-failure circuit breaker on the per-entity GDELT/Google News loops) made after this memo was written. This memo is kept as-is for its design rationale (§2's relevance-matching strategy, §3's methodology argument), not as a description of current code.
+
 **Scope:** Enrich the existing Sentiment worker with a `source='news'` type, alongside Reddit/Steam/YouTube. Not an event detector (acquisitions/layoffs/lawsuits stay with Studio Intel). Free-tier only. This memo is a plan, not code.
 
 **Facts current as of mid-2026; free-tier terms drift, so re-verify GDELT rate-limit behavior and NewsAPI/GNews ToS at build time.**

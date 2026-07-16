@@ -72,7 +72,7 @@ A note on **parallelism and the divergence check:** because the workers run in p
 
 ## Agent 0: Watchlist Seeding Agent (one-time)
 
-**Role:** Build the initial tracked universe — roughly 150–300 games and 30–50 studios — so no manual entry is ever needed. Runs once at project start; Discovery (Agent 6) handles growth from then on.
+**Role:** Build the initial tracked universe — originally targeted at roughly 150–300 games and 30–50 studios — so no manual entry is ever needed. Runs once at project start; Discovery (Agent 6) handles growth from then on. As actually run, the live watchlist is far larger (~4,017 active games as of mid-2026) once the RAWG catalog backfill (`scripts/rawg_backfill.py`) is factored in — see CLAUDE.md's "Running the Agents" section for that script and `tasks.md`'s watchlist-coverage-audit entries for current scale.
 
 ### Tools
 - `igdb_api` — publicly-traded-parent portfolios, release history, hype/follows
@@ -118,7 +118,7 @@ The skill's `SKILL.md` would encode:
 **Role:** Convert unstructured community chatter into a structured, defensible sentiment read. This is the agent with the deepest analytical method, because naive sentiment scoring is notoriously misleading.
 
 ### Tools
-- `reddit_source` — fetch top/hot posts and comments from game subreddits via the public read-only `.json` endpoints (the official Data API is not used); rate-limited, cached, and degrades gracefully when blocked (see the *RedditSource Adapter* and *SupabaseRedditCache* designs). Comment fetches respect the per-game sentiment tier set at seeding.
+- `reddit_source` — fetch top/hot posts and comments from game subreddits via the public read-only `.json` endpoints (the official Data API is not used); rate-limited, cached, and degrades gracefully when blocked (see the *RedditSource Adapter* and *SupabaseApiCache* designs). Comment fetches respect the per-game sentiment tier set at seeding. As built, this is a 4-source `FirstAvailableRedditSource` fallback chain (OAuth → HTTP/HTTPS proxy → unauthenticated `.json`, plus a `REDDIT_SOURCE_PAUSED` kill switch), not the single-source sketch below — see CLAUDE.md's "Sentiment pipeline internals" section for current implementation detail.
 - `youtube_data_api` — comment extraction on patch/review/update videos via the **official Data API** (`commentThreads.list` = 1 quota unit per 100 comments against a free 10,000-unit daily quota; `search.list` is avoided — it costs 100 units and sits in its own tightly capped bucket, so video discovery goes through tracked channels' upload playlists at 1 unit per 50 videos instead). Handles `commentsDisabled` as a normal miss, not an error.
 - `steam_reviews_api` — review text + helpfulness weighting via the public `appreviews` endpoint
 - `news_items_read` — this week's news articles already matched to the game by the standalone news-ingestion module (`agents/workers/news/`, not owned by this subagent — see the note below); fed into a separate stance/frame classifier (`news_stance_client.py`), not the VADER/ABSA pipeline below
@@ -127,7 +127,7 @@ The skill's `SKILL.md` would encode:
 - *(no `x_api` at MVP — X access is pay-per-use as of Feb 2026 and deferred; see the risk register for the cost math and revisit criteria)*
 
 ### Note: news is ingested outside this subagent
-Games-industry news (GDELT + curated games-press RSS + Google News fallback) is fetched, deduped, and matched to watchlist entities by a **standalone `agents/workers/news/` module**, not by this subagent's own tools — one article often spans multiple watchlist entities, and Studio Intel / a future Discovery agent may want to read the same matched articles for their own purposes, so the fetch+match step lives outside any single subagent. This subagent only *reads* the result (`news_items_read`) and scores it. See `docs/news-source-decision-memo.md` for the full rationale, including why news gets its own stance/frame classification (§3) instead of reusing the ABSA aspect vocabulary below.
+Games-industry news (GDELT + curated games-press RSS + Google News fallback) is fetched, deduped, and matched to watchlist entities by a **standalone `agents/workers/news/` module**, not by this subagent's own tools — one article often spans multiple watchlist entities, and Studio Intel / a future Discovery agent may want to read the same matched articles for their own purposes, so the fetch+match step lives outside any single subagent. This subagent only *reads* the result (`news_items_read`) and scores it. See `docs/news-source-decision-memo.md` for the full rationale, including why news gets its own stance/frame classification (§3) instead of reusing the ABSA aspect vocabulary below. See CLAUDE.md's "News ingestion internals" section for the consecutive-failure circuit breaker added to the GDELT/Google News per-entity loops after a live full-watchlist run hung for hours — not reflected in this doc's original design sketch.
 
 ### Skill: `sentiment-analysis-methodology`
 The research is clear that the best-in-class approach is a **hybrid VADER + LLM pipeline with aspect-based analysis**, not either alone. The skill encodes this methodology:
@@ -205,6 +205,8 @@ Encodes how to read organizational signals:
 - **Pre-earnings windows:** flag when a tracked title shows divergence inside the 3–4 weeks before a parent's earnings date — the highest-signal moment
 - **Correlation tracking:** rolling correlation between game-health scores and ticker performance to validate (or invalidate) the thesis over time
 
+**As built, `equity_signals.health_score` does not yet implement this skill's materiality weighting.** It's a simpler, deterministic 0-10 average of up to 4 equal-weighted components (sentiment, patch cadence, player-count momentum, studio distress) with no per-game High/Medium/Low weighting and no persisted data source for one — that would need an LLM reasoning step `agents/workers/financial_overlay/health_score.py` doesn't have. See CLAUDE.md's "Financial overlay health score" section.
+
 ---
 
 ## Agent 6: Discovery Subagent
@@ -223,6 +225,8 @@ Encodes how to read organizational signals:
 - **Trigger thresholds:** what counts as a meaningful trending spike vs. noise
 - **Rationale generation:** a structured template so every proposal arrives with a consistent, reviewable justification
 - **False-positive learning:** reads the log of past rejections to tighten criteria over time
+
+See CLAUDE.md's "Discovery agent internals" section for how this shipped: scoring is fully deterministic (`agents/workers/discovery/scoring.py`), Claude (Haiku) writes only the rationale text, ticker resolution never guesses (an unmatched studio drops the candidate rather than creating a speculative row), and the false-positive learning above is intentionally simple today (skip anything with an existing pending/rejected proposal — no rejection-reason taxonomy yet).
 
 ---
 
@@ -251,9 +255,11 @@ When a signal is ambiguous, the synthesis agent can dispatch a one-off research 
 **Role:** Translate the briefing into a trade plan, then execute approved trades.
 
 ### Tools
-- `alpaca_trading` — at MVP, a thin custom tool wrapping `alpaca-py` (fetch positions, check balances, place orders). Post-migration this becomes **the official Alpaca MCP server** (open-source, Alpaca-maintained, paper-trading mode on by default) called as a native tool — same endpoints, cleaner transport, zero behavioral change.
+- `alpaca_trading` — at MVP, a thin custom tool wrapping `alpaca-py` (fetch positions, check balances, place orders). **As actually built, this is not the official Alpaca MCP server** — that server's bare `place_order` tool would let an LLM bypass the Supabase approval guard, so two custom in-process MCP servers (`agents/portfolio/alpaca_mcp.py`) were built instead: a read-only account-state server for the Portfolio Manager, and a guarded `get_approved_orders`/`place_approved_order` server for the Execution Agent, both wrapping the existing `alpaca_trading_client` functions. See CLAUDE.md's "Portfolio agents MCP internals" section.
 - `db_read` / `db_write` — trade plans, orders, snapshots
 - `alpaca_data_api` / `yfinance` — S&P 500 benchmark (SPY bars) for return comparison
+
+Not covered below: the **Returns Tracker**, a post-execution, no-LLM module that snapshots Alpaca account state into `portfolio_snapshots` and `positions` after each run — shipped after this doc was written. See CLAUDE.md's "Portfolio agents MCP internals" section (its `returns_tracker.py` entry).
 
 ### Skill: `position-sizing-and-risk`
 Encodes disciplined portfolio construction so Claude isn't sizing positions arbitrarily:
@@ -295,7 +301,7 @@ As the skill library grows, prevent conflicts with:
 - **Version control + semantic versioning** for each skill directory, treated like the rest of the codebase (this applies from day one, while the "skills" are still CrewAI prompt documents — same files, same discipline)
 
 ### External data-source adapters (resilience)
-Volatile or unofficial upstreams are isolated behind a single swappable adapter interface so a provider policy change is contained to one module. The reference case is `RedditSource`: with self-service Data API access closed off (Nov 2025 Responsible Builder Policy), the system reads public read-only `.json` endpoints through an adapter that paces requests under the ~10 req/min per-IP unauthenticated ceiling, caches every payload (`SupabaseRedditCache`, backed by a generic `api_cache` table), and degrades to last-known-good on a block rather than failing the run — relevant because the pipeline runs from data-center (GitHub Actions) IPs, which Reddit throttles first. Because every layer (raw fetch, cache wrapper, fallback chain) implements the same interface, an alternate egress (proxy or managed scraper) drops in with no change to the Sentiment or Discovery subagents that depend on it. **The Data Source Risk Register makes this pattern mandatory for every Tier-2 source** — yfinance and the Steam `appreviews` endpoint are next in line. See the dedicated *RedditSource Adapter* and *SupabaseRedditCache* design docs.
+Volatile or unofficial upstreams are isolated behind a single swappable adapter interface so a provider policy change is contained to one module. The reference case is `RedditSource`: with self-service Data API access closed off (Nov 2025 Responsible Builder Policy), the system reads public read-only `.json` endpoints through an adapter that paces requests under the ~10 req/min per-IP unauthenticated ceiling, caches every payload (`SupabaseApiCache`, backed by a generic `api_cache` table), and degrades to last-known-good on a block rather than failing the run — relevant because the pipeline runs from data-center (GitHub Actions) IPs, which Reddit throttles first. Because every layer (raw fetch, cache wrapper, fallback chain) implements the same interface, an alternate egress (proxy or managed scraper) drops in with no change to the Sentiment or Discovery subagents that depend on it. **The Data Source Risk Register makes this pattern mandatory for every Tier-2 source** — yfinance and the Steam `appreviews` endpoint are next in line. See the dedicated *RedditSource Adapter* and *SupabaseApiCache* (renamed from *SupabaseRedditCache*) design docs.
 
 ---
 
