@@ -53,28 +53,54 @@ class GoogleNewsSource:
 
 
 class CachedGoogleNewsSource:
+    """Same sustained-outage circuit breaker as CachedGdeltSource, for the
+    same reason: a stale-cache rescue hides the live failure from the
+    worker's per-entity loop, so the breaker must count live-call failures
+    here, before the rescue -- see CachedGdeltSource's docstring."""
+
     def __init__(
         self,
         inner: GoogleNewsSource,
         cache: ApiCache,
         ttl_hours: float = 12.0,
+        max_consecutive_live_failures: int = 10,
     ) -> None:
         self.inner = inner
         self.cache = cache
         self.ttl_hours = ttl_hours
+        self.max_consecutive_live_failures = max_consecutive_live_failures
+        self._consecutive_live_failures = 0
+
+    def _live_circuit_open(self) -> bool:
+        return self._consecutive_live_failures >= self.max_consecutive_live_failures
 
     def search(self, query: str) -> list[dict]:
         key = f"query:{query}"
         fresh = self.cache.get(key, max_age_hours=self.ttl_hours)
         if fresh is not None:
             return fresh
+        if self._live_circuit_open():
+            stale = self.cache.get(key)
+            if stale is not None:
+                return stale
+            raise RuntimeError(
+                f"live calls circuit-broken after {self._consecutive_live_failures} "
+                f"consecutive failures; no cache for query {query!r}"
+            )
         try:
             articles = self.inner.search(query)
-            self.cache.set(key, articles)
-            return articles
         except Exception:
+            self._consecutive_live_failures += 1
+            if self._live_circuit_open():
+                logger.warning(
+                    "%d consecutive live failures; disabling live Google News calls for the rest of the run",
+                    self._consecutive_live_failures,
+                )
             stale = self.cache.get(key)  # no TTL: stale is better than empty
             if stale is not None:
                 logger.warning("fetch failed for query %r; serving stale cache", query)
                 return stale
             raise
+        self._consecutive_live_failures = 0
+        self.cache.set(key, articles)
+        return articles

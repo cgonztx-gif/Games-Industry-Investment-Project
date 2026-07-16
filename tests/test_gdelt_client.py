@@ -208,3 +208,95 @@ def test_cached_search_reraises_when_blocked_and_no_stale_cache():
         assert False, "expected GdeltBlocked"
     except GdeltBlocked:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Live-call circuit breaker (CI run 29438324984, 2026-07-15: stale-cache
+# rescues hid every live failure from the worker's loop-level breaker, so the
+# run ground through ~6h of full-cost retry cycles without ever tripping it.
+# The cached source itself must stop calling the network after a sustained
+# consecutive live-failure streak, regardless of stale rescues.)
+# ---------------------------------------------------------------------------
+
+class _CountingBlockedInner:
+    def __init__(self):
+        self.calls = 0
+
+    def search(self, *args, **kwargs):
+        self.calls += 1
+        raise GdeltBlocked("429")
+
+
+def test_circuit_breaker_stops_live_calls_despite_stale_rescues():
+    inner = _CountingBlockedInner()
+    cache = InMemoryApiCache()
+    # Every query has stale cache, so every failure is rescued and the
+    # caller never sees an exception -- the exact pattern that defeated the
+    # worker-level breaker in CI.
+    for i in range(15):
+        cache._store[f"query:q{i}:1w"] = ([{"url": f"https://stale.com/{i}"}], 0.0)
+    source = CachedGdeltSource(inner, cache=cache, max_consecutive_live_failures=10)
+
+    results = [source.search(f"q{i}") for i in range(15)]
+
+    assert inner.calls == 10  # live calls stop at the limit
+    assert all(r == [{"url": f"https://stale.com/{i}"}] for i, r in enumerate(results))
+
+
+def test_circuit_breaker_open_raises_immediately_when_no_stale():
+    inner = _CountingBlockedInner()
+    cache = InMemoryApiCache()
+    for i in range(10):
+        cache._store[f"query:q{i}:1w"] = ([{"url": "https://stale.com/x"}], 0.0)
+    source = CachedGdeltSource(inner, cache=cache, max_consecutive_live_failures=10)
+    for i in range(10):
+        source.search(f"q{i}")  # trip the breaker via stale-rescued failures
+
+    try:
+        source.search("uncached")
+        assert False, "expected GdeltBlocked"
+    except GdeltBlocked:
+        pass
+    assert inner.calls == 10  # the uncached query made no live call
+
+
+def test_circuit_breaker_streak_resets_on_live_success():
+    class _NinthTimeLucky:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls % 10 == 0:
+                return [{"url": "https://live.com/ok"}]
+            raise GdeltBlocked("429")
+
+    inner = _NinthTimeLucky()
+    cache = InMemoryApiCache()
+    for i in range(30):
+        cache._store[f"query:q{i}:1w"] = ([{"url": "https://stale.com/x"}], 0.0)
+    source = CachedGdeltSource(inner, cache=cache, max_consecutive_live_failures=10)
+
+    # 9 failures then a success, repeated: the streak never reaches 10, so
+    # every distinct query gets a real live attempt.
+    for i in range(30):
+        source.search(f"q{i}")
+
+    assert inner.calls == 30
+
+
+def test_circuit_breaker_fresh_cache_hit_does_not_reset_streak():
+    inner = _CountingBlockedInner()
+    cache = InMemoryApiCache()
+    for i in range(12):
+        cache._store[f"query:q{i}:1w"] = ([{"url": "https://stale.com/x"}], 0.0)
+    source = CachedGdeltSource(inner, cache=cache, max_consecutive_live_failures=10)
+
+    for i in range(5):
+        source.search(f"q{i}")  # 5 live failures
+    cache.set("query:fresh:1w", [{"url": "https://fresh.com/a"}])
+    source.search("fresh")  # fresh hit: no network touched, streak unchanged
+    for i in range(5, 12):
+        source.search(f"q{i}")
+
+    assert inner.calls == 10  # streak continued through the fresh hit

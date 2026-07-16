@@ -115,9 +115,9 @@ def _run(
     monkeypatch.setattr(news_worker, "SupabaseApiCache", lambda client, source: fake_disambig)
 
     # Wrap classes so we can inject our fakes
-    monkeypatch.setattr(news_worker, "CachedGdeltSource", lambda inner, cache: gdelt_source)
+    monkeypatch.setattr(news_worker, "CachedGdeltSource", lambda inner, cache, **kw: gdelt_source)
     monkeypatch.setattr(news_worker, "GdeltSource", lambda: None)
-    monkeypatch.setattr(news_worker, "CachedGoogleNewsSource", lambda inner, cache: gnews_source)
+    monkeypatch.setattr(news_worker, "CachedGoogleNewsSource", lambda inner, cache, **kw: gnews_source)
     monkeypatch.setattr(news_worker, "GoogleNewsSource", lambda: None)
     monkeypatch.setattr(news_worker, "CachedRssSource", lambda cache: None)
     monkeypatch.setattr(news_worker, "resolve_matched_entities", resolve_fn)

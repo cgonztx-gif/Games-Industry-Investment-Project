@@ -170,3 +170,58 @@ def test_raises_when_blocked_and_no_stale():
         assert False, "expected exception"
     except Exception as exc:
         assert not isinstance(exc, AssertionError)
+
+
+# ---------------------------------------------------------------------------
+# Live-call circuit breaker (same flaw and fix as CachedGdeltSource -- see
+# tests/test_gdelt_client.py's circuit-breaker section)
+# ---------------------------------------------------------------------------
+
+def test_circuit_breaker_stops_live_calls_despite_stale_rescues():
+    class _CountingFailInner:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, query):
+            self.calls += 1
+            raise requests.ConnectionError("unreachable")
+
+    inner = _CountingFailInner()
+    cache = InMemoryApiCache()
+    for i in range(15):
+        cache._store[f"query:q{i}"] = ([{"url": f"https://stale.com/{i}"}], 0.0)
+    source = CachedGoogleNewsSource(
+        inner, cache=cache, ttl_hours=12.0, max_consecutive_live_failures=10
+    )
+
+    results = [source.search(f"q{i}") for i in range(15)]
+
+    assert inner.calls == 10
+    assert all(r == [{"url": f"https://stale.com/{i}"}] for i, r in enumerate(results))
+
+
+def test_circuit_breaker_open_raises_immediately_when_no_stale():
+    class _CountingFailInner:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, query):
+            self.calls += 1
+            raise requests.ConnectionError("unreachable")
+
+    inner = _CountingFailInner()
+    cache = InMemoryApiCache()
+    for i in range(10):
+        cache._store[f"query:q{i}"] = ([{"url": "https://stale.com/x"}], 0.0)
+    source = CachedGoogleNewsSource(
+        inner, cache=cache, ttl_hours=12.0, max_consecutive_live_failures=10
+    )
+    for i in range(10):
+        source.search(f"q{i}")
+
+    try:
+        source.search("uncached")
+        assert False, "expected an exception"
+    except Exception as exc:
+        assert not isinstance(exc, AssertionError)
+    assert inner.calls == 10

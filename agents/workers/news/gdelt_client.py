@@ -152,28 +152,61 @@ class GdeltSource:
 # ---------------------------------------------------------------------------
 
 class CachedGdeltSource:
+    """Besides fresh-cache/serve-stale semantics, this wrapper owns the
+    sustained-outage circuit breaker: after `max_consecutive_live_failures`
+    live calls fail in a row, it stops calling GDELT entirely for the rest of
+    the run (stale cache is still served where it exists; otherwise
+    GdeltBlocked raises immediately). The breaker must live HERE, not only in
+    the worker's per-entity loop: a stale-cache rescue makes the worker see a
+    success, so a worker-level consecutive-failure counter resets on every
+    cached entity even while every live call is failing and paying the full
+    retry/backoff cost -- confirmed live in CI run 29438324984 (2026-07-15),
+    which ground through 317 exhausted-retry cycles interleaved with 196
+    stale serves for ~6h without the worker-level breaker ever tripping."""
+
     def __init__(
         self,
         inner: GdeltSource,
         cache: ApiCache,
         ttl_hours: float = 24.0,
+        max_consecutive_live_failures: int = 10,
     ) -> None:
         self.inner = inner
         self.cache = cache
         self.ttl_hours = ttl_hours
+        self.max_consecutive_live_failures = max_consecutive_live_failures
+        self._consecutive_live_failures = 0
+
+    def _live_circuit_open(self) -> bool:
+        return self._consecutive_live_failures >= self.max_consecutive_live_failures
 
     def search(self, query: str, timespan: str = "1w", max_records: int = 250) -> list[dict]:
         key = f"query:{query}:{timespan}"
         fresh = self.cache.get(key, max_age_hours=self.ttl_hours)
         if fresh is not None:
             return fresh
+        if self._live_circuit_open():
+            stale = self.cache.get(key)
+            if stale is not None:
+                return stale
+            raise GdeltBlocked(
+                f"live calls circuit-broken after {self._consecutive_live_failures} "
+                f"consecutive failures; no cache for query {query!r}"
+            )
         try:
             articles = self.inner.search(query, timespan=timespan, max_records=max_records)
-            self.cache.set(key, articles)
-            return articles
         except GdeltBlocked:
+            self._consecutive_live_failures += 1
+            if self._live_circuit_open():
+                logger.warning(
+                    "%d consecutive live failures; disabling live GDELT calls for the rest of the run",
+                    self._consecutive_live_failures,
+                )
             stale = self.cache.get(key)  # no TTL: stale is better than empty
             if stale is not None:
                 logger.warning("blocked; serving stale cache for query %r", query)
                 return stale
             raise
+        self._consecutive_live_failures = 0
+        self.cache.set(key, articles)
+        return articles

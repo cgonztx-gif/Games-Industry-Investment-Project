@@ -36,6 +36,17 @@ from agents.workers.news.rss_client import CachedRssSource, fetch_curated_feeds
 # many *consecutive* calls fail, rather than paying full per-entity retry
 # cost across the whole watchlist. Isolated failures (a handful of
 # entities with no real coverage) don't trip it.
+#
+# The limit is enforced at two layers. The loop-level breakers below only see
+# failures that propagate out of the cached sources -- a stale-cache rescue
+# looks like a success here and resets the loop counter, even though the live
+# call failed and paid its full retry cost first (confirmed live in CI run
+# 29438324984, 2026-07-15: 317 exhausted-retry cycles interleaved with 196
+# stale serves, ~6h, loop breaker never tripped). The authoritative cost
+# bound is therefore inside CachedGdeltSource/CachedGoogleNewsSource, which
+# count consecutive *live-call* failures before any stale rescue and stop
+# calling the network entirely once tripped; the loop breakers remain as a
+# secondary guard for the no-cache case.
 _CONSECUTIVE_FAILURE_LIMIT = 10
 
 
@@ -71,9 +82,15 @@ def run() -> dict:
     entities = get_watchlist_entities_with_aliases(db)
 
     rss_source = CachedRssSource(cache=SupabaseApiCache(client=db, source="news_rss"))
-    gdelt_source = CachedGdeltSource(GdeltSource(), cache=SupabaseApiCache(client=db, source="gdelt"))
+    gdelt_source = CachedGdeltSource(
+        GdeltSource(),
+        cache=SupabaseApiCache(client=db, source="gdelt"),
+        max_consecutive_live_failures=_CONSECUTIVE_FAILURE_LIMIT,
+    )
     gnews_source = CachedGoogleNewsSource(
-        GoogleNewsSource(), cache=SupabaseApiCache(client=db, source="gnews_rss")
+        GoogleNewsSource(),
+        cache=SupabaseApiCache(client=db, source="gnews_rss"),
+        max_consecutive_live_failures=_CONSECUTIVE_FAILURE_LIMIT,
     )
     disambig_cache = SupabaseApiCache(client=db, source="news_disambiguation")
 
