@@ -113,6 +113,10 @@ def _get_briefing_ok(db):
     return dict(_FAKE_BRIEFING)
 
 
+def _no_existing_plan(db, week_of):
+    return None
+
+
 def _account_state_ok():
     return {"cash": 10000.0, "buying_power": 20000.0, "portfolio_value": 50000.0, "positions": []}
 
@@ -145,6 +149,7 @@ def test_valid_plan_writes_plan_and_orders():
         run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=_no_existing_plan,
         get_account_state_fn=_account_state_ok,
         write_trade_plan_fn=writers.write_trade_plan,
         write_trade_order_fn=writers.write_trade_order,
@@ -194,6 +199,7 @@ def test_account_state_unavailable_still_produces_plan():
         run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=_no_existing_plan,
         get_account_state_fn=_account_state_fails,
         write_trade_plan_fn=writers.write_trade_plan,
         write_trade_order_fn=writers.write_trade_order,
@@ -232,6 +238,7 @@ def test_refusal_or_error_returns_none():
         run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=_no_existing_plan,
         get_account_state_fn=_account_state_ok,
         write_trade_plan_fn=writers.write_trade_plan,
         write_trade_order_fn=writers.write_trade_order,
@@ -250,6 +257,7 @@ def test_malformed_json_returns_none():
         run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=_no_existing_plan,
         get_account_state_fn=_account_state_ok,
         write_trade_plan_fn=writers.write_trade_plan,
         write_trade_order_fn=writers.write_trade_order,
@@ -267,6 +275,7 @@ def test_missing_orders_key_returns_none():
         run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=_no_existing_plan,
         get_account_state_fn=_account_state_ok,
         write_trade_plan_fn=writers.write_trade_plan,
         write_trade_order_fn=writers.write_trade_order,
@@ -283,6 +292,7 @@ def test_runner_exception_returns_none():
         run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=_no_existing_plan,
         get_account_state_fn=_account_state_ok,
         write_trade_plan_fn=writers.write_trade_plan,
         write_trade_order_fn=writers.write_trade_order,
@@ -290,6 +300,37 @@ def test_runner_exception_returns_none():
 
     assert result is None
     assert writers.plan_calls == []
+
+
+def test_existing_plan_for_week_skips_duplicate(monkeypatch):
+    """
+    Same-week re-run guard: trade_plans has no unique constraint on week_of,
+    so a re-dispatched synthesize phase used to insert a second pending plan
+    (plus duplicate pending orders) for the same week. With a plan already on
+    record for the briefing's week_of, build_trade_plan must skip -- before
+    the (expensive, Opus-class) agent session ever runs.
+    """
+    writers = _FakeDBWriters()
+    runner = FakeAgentRunner(response_text=_VALID_PLAN_JSON)
+
+    result = build_trade_plan(
+        run_agent_fn=runner,
+        db=_FAKE_DB,
+        get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=lambda db, week_of: {
+            "plan_id": "plan-existing",
+            "week_of": week_of,
+            "status": "pending",
+        },
+        get_account_state_fn=_account_state_ok,
+        write_trade_plan_fn=writers.write_trade_plan,
+        write_trade_order_fn=writers.write_trade_order,
+    )
+
+    assert result is None
+    assert writers.plan_calls == []
+    assert writers.order_calls == []
+    assert runner.last_kwargs is None  # the LLM session was never started
 
 
 def test_markdown_fenced_json_is_stripped():
@@ -301,6 +342,7 @@ def test_markdown_fenced_json_is_stripped():
         run_agent_fn=runner,
         db=_FAKE_DB,
         get_briefing_fn=_get_briefing_ok,
+        get_plan_for_week_fn=_no_existing_plan,
         get_account_state_fn=_account_state_ok,
         write_trade_plan_fn=writers.write_trade_plan,
         write_trade_order_fn=writers.write_trade_order,

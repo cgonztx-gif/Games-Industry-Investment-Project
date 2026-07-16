@@ -66,6 +66,7 @@ from agents.token_tracking import record_usage
 from database.db_client import (
     get_client,
     get_latest_weekly_briefing,
+    get_trade_plan_for_week,
     write_trade_order,
     write_trade_plan,
 )
@@ -255,6 +256,7 @@ def build_trade_plan(
     run_agent_fn=_default_run_agent,
     db=None,
     get_briefing_fn=get_latest_weekly_briefing,
+    get_plan_for_week_fn=get_trade_plan_for_week,
     get_account_state_fn=get_account_state,
     write_trade_plan_fn=write_trade_plan,
     write_trade_order_fn=write_trade_order,
@@ -287,6 +289,19 @@ def build_trade_plan(
     briefing = get_briefing_fn(active_db)
     if briefing is None:
         print("[portfolio manager] no weekly briefing available; skipping trade plan")
+        return None
+
+    # Same-week re-run guard: trade_plans has no unique constraint on week_of,
+    # so a re-dispatched synthesize phase would otherwise insert a second
+    # pending plan (with duplicate pending orders) for the same week. Checked
+    # before the Agent SDK session so a re-run also skips the Opus call.
+    existing_plan = get_plan_for_week_fn(active_db, briefing["week_of"])
+    if existing_plan is not None:
+        print(
+            f"[portfolio manager] trade plan {existing_plan.get('plan_id')} already "
+            f"exists for week_of {briefing['week_of']} "
+            f"(status={existing_plan.get('status')!r}); skipping duplicate plan"
+        )
         return None
 
     as_of = run_date or date.today().isoformat()

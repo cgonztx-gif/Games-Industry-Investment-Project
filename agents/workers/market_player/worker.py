@@ -49,7 +49,10 @@ def run() -> dict:
         try:
             metrics = get_app_metrics(steam_id, review_cache=review_cache)
 
-            prev = get_last_player_metrics(db, game_id)
+            # before_date=today: anchor review_velocity to the previous
+            # *distinct* collection day, so a same-day re-run doesn't compare
+            # against its own earlier upsert and clobber velocity to ~0.
+            prev = get_last_player_metrics(db, game_id, before_date=today)
             velocity = None
             if prev and metrics.get("review_count") is not None:
                 velocity = metrics["review_count"] - (prev.get("review_count") or 0)

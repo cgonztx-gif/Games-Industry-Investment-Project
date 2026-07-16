@@ -4,7 +4,7 @@ import os
 
 import requests
 
-from database.db_client import attach_alpaca_order_id, get_trade_order
+from database.db_client import get_trade_order, mark_trade_order_filled
 
 _DEFAULT_PAPER_BASE = "https://paper-api.alpaca.markets"
 
@@ -87,6 +87,14 @@ def place_approved_order(db, order_id: str) -> dict:
         raise TradeNotApproved(
             f"trade_order {order_id} has status {trade.get('status')!r}; expected 'approved'"
         )
+    if trade.get("alpaca_order_id"):
+        # Belt-and-suspenders against double-placement: even if the status
+        # update after a placement was lost, a recorded Alpaca order id means
+        # this order already reached Alpaca once.
+        raise TradeNotApproved(
+            f"trade_order {order_id} was already placed at Alpaca as "
+            f"{trade['alpaca_order_id']!r}; refusing to place it again"
+        )
 
     action = trade.get("action")
     if action == "hold":
@@ -102,6 +110,10 @@ def place_approved_order(db, order_id: str) -> dict:
         "side": action,
         "type": "market",
         "time_in_force": "day",
+        # Alpaca enforces client_order_id uniqueness, so even a crash between
+        # the placement below and mark_trade_order_filled cannot lead to the
+        # same trade_orders row being executed twice at Alpaca on a re-run.
+        "client_order_id": order_id,
         "notional": str(trade["size_usd"]),
     }
     resp = requests.post(
@@ -112,7 +124,7 @@ def place_approved_order(db, order_id: str) -> dict:
     )
     resp.raise_for_status()
     order = resp.json()
-    alpaca_order_id = order.get("id")
-    if alpaca_order_id:
-        attach_alpaca_order_id(db, order_id, alpaca_order_id)
+    # Flip the row out of the 'approved' pool the moment placement succeeds --
+    # get_approved_trade_orders must never return it again on a later run.
+    mark_trade_order_filled(db, order_id, order.get("id"))
     return order

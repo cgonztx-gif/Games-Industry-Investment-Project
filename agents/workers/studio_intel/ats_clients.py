@@ -60,7 +60,7 @@ def fetch_lever_jobs(company: str) -> list[dict]:
         {
             "title": job.get("text", ""),
             "department": job.get("team", ""),
-            "location": job.get("categories", {}).get("location", ""),
+            "location": (job.get("categories") or {}).get("location", ""),
             "url": job.get("hostedUrl"),
         }
         for job in (data or [])

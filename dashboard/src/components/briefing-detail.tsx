@@ -72,9 +72,31 @@ function OpportunityItem({
       </div>
       <p className="text-sm">{item.interpretation}</p>
       {item.deep_dive && (
-        <div className="rounded-md bg-muted/50 p-3 text-sm">
-          <div className="mb-1 text-xs font-medium text-muted-foreground">Deep dive</div>
-          {item.deep_dive}
+        // deep_dive is the structured findings object run_deep_dive() writes
+        // ({summary, sources, confidence}); rendering it bare as a JSX child
+        // used to throw "Objects are not valid as a React child" and crash
+        // the page on the first briefing with a populated deep dive.
+        <div className="space-y-1.5 rounded-md bg-muted/50 p-3 text-sm">
+          <div className="text-xs font-medium text-muted-foreground">
+            Deep dive · {item.deep_dive.confidence} confidence
+          </div>
+          <p>{item.deep_dive.summary}</p>
+          {(item.deep_dive.sources ?? []).length > 0 && (
+            <ul className="space-y-0.5 text-xs text-muted-foreground">
+              {(item.deep_dive.sources ?? []).map((source) => (
+                <li key={source} className="truncate">
+                  <a
+                    href={source}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hover:underline"
+                  >
+                    {source}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>

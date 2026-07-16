@@ -198,3 +198,57 @@ def test_retry_call_only_retries_specified_exceptions(monkeypatch):
     with pytest.raises(TypeError):
         retry_call(fn, max_retries=3, exceptions=(ValueError,))
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Retry-After parsing (regression: HTTP-date form crashed the retry loop)
+# ---------------------------------------------------------------------------
+
+def test_http_date_retry_after_does_not_crash_and_still_retries(monkeypatch):
+    """Retry-After is legally either delta-seconds or an HTTP-date. float() on
+    the date form used to raise ValueError straight through the retry loop --
+    an exception type no caller expects from a retryable 429."""
+    sleeps = []
+    monkeypatch.setattr("agents.http_retry.time.sleep", sleeps.append)
+    responses = [
+        _FakeResponse(429, headers={"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"}),
+        _FakeResponse(200),
+    ]
+
+    resp = request_with_retry(lambda *a, **kw: responses.pop(0), "http://example.com")
+
+    assert resp.status_code == 200
+    # Fell back to exponential backoff instead of crashing.
+    assert sleeps == [1.0]
+
+
+def test_huge_retry_after_is_capped(monkeypatch):
+    """A server demanding an hours-long wait would stall the whole per-item
+    worker loop; the honored delay is clamped to the module ceiling."""
+    from agents.http_retry import _MAX_RETRY_AFTER_SECONDS
+
+    sleeps = []
+    monkeypatch.setattr("agents.http_retry.time.sleep", sleeps.append)
+    responses = [
+        _FakeResponse(429, headers={"Retry-After": "86400"}),
+        _FakeResponse(200),
+    ]
+
+    resp = request_with_retry(lambda *a, **kw: responses.pop(0), "http://example.com")
+
+    assert resp.status_code == 200
+    assert sleeps == [_MAX_RETRY_AFTER_SECONDS]
+
+
+def test_numeric_retry_after_is_honored(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr("agents.http_retry.time.sleep", sleeps.append)
+    responses = [
+        _FakeResponse(429, headers={"Retry-After": "7"}),
+        _FakeResponse(200),
+    ]
+
+    resp = request_with_retry(lambda *a, **kw: responses.pop(0), "http://example.com")
+
+    assert resp.status_code == 200
+    assert sleeps == [7.0]

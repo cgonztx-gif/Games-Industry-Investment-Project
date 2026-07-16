@@ -36,6 +36,33 @@ logger = logging.getLogger("http_retry")
 
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 
+# Ceiling on a server-supplied Retry-After delay. This helper is for quick
+# transient blips inside per-item worker loops that run across thousands of
+# items -- honoring an hours-long Retry-After would stall the whole run (the
+# GDELT incident showed what unbounded per-item waiting does at watchlist
+# scale). A server demanding a longer wait effectively isn't transient.
+_MAX_RETRY_AFTER_SECONDS = 60.0
+
+
+def _retry_after_delay(header_value: str | None, fallback: float) -> float:
+    """
+    Parse a Retry-After header into a bounded delay in seconds.
+
+    Retry-After is legally either delta-seconds ("120") or an HTTP-date
+    ("Wed, 21 Oct 2026 07:28:00 GMT") -- float() on the date form raised
+    ValueError straight through the retry loop, crashing the call site with an
+    exception type no caller expects from a retryable status. Unparseable
+    values fall back to the exponential-backoff delay; parsed values are
+    clamped to [0, _MAX_RETRY_AFTER_SECONDS].
+    """
+    if header_value is None:
+        return fallback
+    try:
+        delay = float(header_value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(0.0, min(delay, _MAX_RETRY_AFTER_SECONDS))
+
 T = TypeVar("T")
 
 
@@ -79,7 +106,9 @@ def request_with_retry(
         if resp.status_code not in _RETRYABLE_STATUSES or attempt == max_retries:
             return resp
 
-        delay = float(resp.headers.get("Retry-After", backoff_base * (2 ** (attempt - 1))))
+        delay = _retry_after_delay(
+            resp.headers.get("Retry-After"), backoff_base * (2 ** (attempt - 1))
+        )
         logger.warning(
             "transient %s (attempt %d/%d); retrying in %.1fs",
             resp.status_code, attempt, max_retries, delay,

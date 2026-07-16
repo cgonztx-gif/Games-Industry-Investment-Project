@@ -60,10 +60,17 @@ def _run(
         )
 
     monkeypatch.setattr(market_worker, "get_app_metrics", _fake_get_app_metrics)
+    def _fake_get_last_player_metrics(db, game_id, before_date=None):
+        prev = last_metrics_by_game.get(game_id)
+        # Mirror the real before_date semantics (exclusive) so the same-day
+        # re-run regression test below can seed a "today" row and prove it is
+        # never used as the velocity baseline.
+        if prev is not None and before_date is not None and prev.get("date") >= before_date:
+            return None
+        return prev
+
     monkeypatch.setattr(
-        market_worker,
-        "get_last_player_metrics",
-        lambda db, game_id: last_metrics_by_game.get(game_id),
+        market_worker, "get_last_player_metrics", _fake_get_last_player_metrics
     )
 
     def _fake_write(db, row):
@@ -126,6 +133,37 @@ def test_review_velocity_computed_against_previous_snapshot(monkeypatch):
     assert written[0]["review_velocity"] == 200
 
 
+def test_same_day_rerun_does_not_clobber_review_velocity(monkeypatch):
+    """
+    Regression: get_last_player_metrics used to return the run's own same-day
+    upsert on a re-run (order date desc, no exclusion), so review_velocity was
+    recomputed against today's just-written review_count and clobbered to ~0.
+    The worker must pass before_date=today so the baseline is the previous
+    *distinct* collection day.
+    """
+    from datetime import date
+
+    today = date.today().isoformat()
+    games = [_game("g1", "Elden Ring", "100")]
+    metrics = {"100": {"ccu": 5000, "review_score": 95.0, "review_count": 1200}}
+    # Simulate the re-run: today's own row (from the first run) is the most
+    # recent player_metrics row. With before_date=today the fake returns None,
+    # exactly like the real .lt("date", today) filter would.
+    last_metrics = {"g1": {"review_count": 1200, "date": today}}
+    written = []
+
+    _run(
+        games=games,
+        metrics_by_app_id=metrics,
+        last_metrics_by_game=last_metrics,
+        written=written,
+        monkeypatch=monkeypatch,
+    )
+
+    # Not 0 (1200 - 1200): today's own row must be excluded from the baseline.
+    assert written[0]["review_velocity"] is None
+
+
 def test_review_velocity_none_when_no_previous_snapshot(monkeypatch):
     games = [_game("g1", "Elden Ring", "100")]
     metrics = {"100": {"ccu": 5000, "review_score": 95.0, "review_count": 1200}}
@@ -183,7 +221,9 @@ def test_peak_map_fetch_failure_degrades_to_empty_map_not_crash(monkeypatch):
         "get_app_metrics",
         lambda steam_id, review_cache=None: {"ccu": 100, "review_score": 90.0, "review_count": 10},
     )
-    monkeypatch.setattr(market_worker, "get_last_player_metrics", lambda db, game_id: None)
+    monkeypatch.setattr(
+        market_worker, "get_last_player_metrics", lambda db, game_id, before_date=None: None
+    )
     written = []
     monkeypatch.setattr(market_worker, "write_player_metrics", lambda db, row: written.append(row))
 

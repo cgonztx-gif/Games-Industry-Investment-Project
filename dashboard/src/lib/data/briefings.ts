@@ -17,6 +17,15 @@ export type NotableEvents = {
   studio_signals: number
 }
 
+// Shape written by agents/synthesis/deep_dive.py::run_deep_dive() -- a
+// structured findings object, not a string. None/null when the dispatched
+// deep dive failed, was refused, or returned unparseable output.
+export type DeepDiveFindings = {
+  summary: string
+  sources: string[]
+  confidence: "high" | "medium" | "low"
+}
+
 export type TopOpportunity = {
   game_id: string
   type: "bearish_text_stable_quant"
@@ -26,7 +35,7 @@ export type TopOpportunity = {
   patch_activity_this_week: boolean
   interpretation: string
   deep_dive_triggered?: boolean
-  deep_dive?: string | null
+  deep_dive?: DeepDiveFindings | null
 }
 
 // risk_flags mixes two different origins in one array -- game-level rows

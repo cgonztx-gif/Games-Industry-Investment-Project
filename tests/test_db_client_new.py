@@ -22,11 +22,17 @@ from database.db_client import (
     get_active_watchlist_external_ids,
     get_existing_company_proposal_status,
     get_existing_proposal_status,
+    get_last_player_metrics,
     get_studios_with_tickers,
     get_tracked_game_counts_by_studio,
+    get_trade_plan_for_week,
     get_watchlist_games,
+    get_weekly_outputs,
+    mark_trade_order_filled,
     write_ccu_snapshots_batch,
     write_news_item,
+    write_patch_event,
+    write_studio_signal,
     write_watchlist_proposal,
 )
 
@@ -55,7 +61,10 @@ class _Query:
     """Builder that accumulates filters and executes against in-memory data."""
 
     def __init__(self, rows: list[dict], inserts: list, updates: list, upserts: list):
-        self._rows = list(rows)
+        # Shared reference to the table's row list (not a copy) so inserts
+        # persist and a later query on the same _FakeClient sees them --
+        # required to exercise read-check-then-insert idempotency helpers.
+        self._rows = rows
         self._inserts = inserts
         self._updates = updates
         self._upserts = upserts
@@ -93,6 +102,18 @@ class _Query:
 
     def eq(self, col, val):
         self._filters.append(("eq", col, val))
+        return self
+
+    def gte(self, col, val):
+        self._filters.append(("gte", col, val))
+        return self
+
+    def lte(self, col, val):
+        self._filters.append(("lte", col, val))
+        return self
+
+    def lt(self, col, val):
+        self._filters.append(("lt", col, val))
         return self
 
     def is_(self, col, val):
@@ -155,6 +176,16 @@ class _Query:
                 return False
             if op == "eq_val" and row.get(col) != val:
                 return False
+            if op in ("gte", "lte", "lt"):
+                cell = row.get(col)
+                if cell is None:
+                    return False
+                if op == "gte" and not cell >= val:
+                    return False
+                if op == "lte" and not cell <= val:
+                    return False
+                if op == "lt" and not cell < val:
+                    return False
         return True
 
 
@@ -488,6 +519,209 @@ def test_write_ccu_snapshots_batch_empty_list_is_a_noop():
     write_ccu_snapshots_batch(db, [])
 
     assert db._inserts.get("ccu_snapshots", []) == []
+
+
+# ---------------------------------------------------------------------------
+# get_weekly_outputs — cross-midnight window (multi-job CI layout)
+# ---------------------------------------------------------------------------
+
+def test_get_weekly_outputs_includes_rows_from_earlier_phase_dates():
+    """
+    Regression: player_metrics / sentiment_snapshots / equity_signals used to
+    be filtered with .eq("date", run_date). Under the four-job CI chain the
+    collect/sentiment phases can finish on the previous UTC date, so an
+    exact-date filter silently dropped every one of their rows whenever the
+    chain crossed midnight and synthesis produced an empty briefing.
+    """
+    db = _FakeClient()
+    db.seed("player_metrics", [
+        {"game_id": "g1", "date": "2026-07-14", "concurrent_players": 900},
+    ])
+    db.seed("sentiment_snapshots", [
+        {"game_id": "g1", "date": "2026-07-14", "source": "steam", "sentiment_score": 3.0},
+    ])
+    db.seed("equity_signals", [
+        {"ticker": "TTWO", "date": "2026-07-14", "health_score": 7.0},
+    ])
+
+    outputs = get_weekly_outputs(db, run_date="2026-07-15", week_start="2026-07-09")
+
+    assert [r["game_id"] for r in outputs["player_metrics"]] == ["g1"]
+    assert [r["source"] for r in outputs["sentiment"]] == ["steam"]
+    assert [r["ticker"] for r in outputs["equity_signals"]] == ["TTWO"]
+
+
+def test_get_weekly_outputs_keeps_only_latest_row_per_key():
+    """With a whole week in the window, only the most recent row per game
+    (player_metrics), per (game, source) (sentiment), and per ticker
+    (equity_signals) may survive -- synthesis builds {game_id: row} maps and
+    averages sentiment per game, so older same-week rows would corrupt both."""
+    db = _FakeClient()
+    db.seed("player_metrics", [
+        {"game_id": "g1", "date": "2026-07-10", "concurrent_players": 100},
+        {"game_id": "g1", "date": "2026-07-14", "concurrent_players": 900},
+    ])
+    db.seed("sentiment_snapshots", [
+        {"game_id": "g1", "date": "2026-07-10", "source": "steam", "sentiment_score": 9.0},
+        {"game_id": "g1", "date": "2026-07-14", "source": "steam", "sentiment_score": 3.0},
+        {"game_id": "g1", "date": "2026-07-14", "source": "news", "sentiment_score": 6.0},
+    ])
+    db.seed("equity_signals", [
+        {"ticker": "TTWO", "date": "2026-07-10", "health_score": 2.0},
+        {"ticker": "TTWO", "date": "2026-07-14", "health_score": 7.0},
+    ])
+
+    outputs = get_weekly_outputs(db, run_date="2026-07-15", week_start="2026-07-09")
+
+    assert len(outputs["player_metrics"]) == 1
+    assert outputs["player_metrics"][0]["concurrent_players"] == 900
+    # One row per (game, source): the older steam row is dropped, news survives.
+    assert {(r["source"], r["sentiment_score"]) for r in outputs["sentiment"]} == {
+        ("steam", 3.0),
+        ("news", 6.0),
+    }
+    assert len(outputs["equity_signals"]) == 1
+    assert outputs["equity_signals"][0]["health_score"] == 7.0
+
+
+def test_get_weekly_outputs_excludes_rows_outside_week_window():
+    db = _FakeClient()
+    db.seed("player_metrics", [
+        {"game_id": "g-old", "date": "2026-07-01", "concurrent_players": 5},
+    ])
+
+    outputs = get_weekly_outputs(db, run_date="2026-07-15", week_start="2026-07-09")
+
+    assert outputs["player_metrics"] == []
+
+
+# ---------------------------------------------------------------------------
+# get_last_player_metrics — before_date (same-day re-run velocity anchor)
+# ---------------------------------------------------------------------------
+
+def test_get_last_player_metrics_before_date_excludes_todays_row():
+    db = _FakeClient()
+    db.seed("player_metrics", [
+        {"game_id": "g1", "date": "2026-07-08", "review_count": 1000},
+        {"game_id": "g1", "date": "2026-07-15", "review_count": 1200},
+    ])
+
+    latest = get_last_player_metrics(db, "g1")
+    prev = get_last_player_metrics(db, "g1", before_date="2026-07-15")
+
+    assert latest["date"] == "2026-07-15"
+    assert prev["date"] == "2026-07-08"
+    assert prev["review_count"] == 1000
+
+
+# ---------------------------------------------------------------------------
+# write_studio_signal / write_patch_event — NULL source_url idempotency
+# ---------------------------------------------------------------------------
+
+def test_write_studio_signal_with_null_source_url_is_idempotent():
+    """Regression: .eq('source_url', None) never matches SQL NULL, so an ATS
+    hiring signal whose job posting had no URL was re-inserted on every
+    same-day re-run."""
+    db = _FakeClient()
+    signal = {
+        "studio_id": "s1",
+        "date": "2026-07-15",
+        "signal_type": "hiring_surge",
+        "description": "20 open roles",
+        "severity": "medium",
+        "source_url": None,
+    }
+
+    assert write_studio_signal(db, signal) is True
+    assert write_studio_signal(db, dict(signal)) is False
+    assert len(db._inserts["studio_signals"]) == 1
+
+
+def test_write_studio_signal_with_source_url_still_idempotent():
+    db = _FakeClient()
+    signal = {
+        "studio_id": "s1",
+        "date": "2026-07-15",
+        "signal_type": "layoffs",
+        "description": "8-K",
+        "severity": "high",
+        "source_url": "https://sec.gov/filing/1",
+    }
+
+    assert write_studio_signal(db, signal) is True
+    assert write_studio_signal(db, dict(signal)) is False
+    assert len(db._inserts["studio_signals"]) == 1
+
+
+def test_write_patch_event_without_source_url_is_idempotent():
+    """Regression: an event with no source_url skipped the pre-check entirely,
+    so it was re-inserted on every run whose 45-day lookback re-saw it."""
+    db = _FakeClient()
+    event = {
+        "game_id": "g1",
+        "date": "2026-07-10",
+        "patch_type": "balance",
+        "scope_summary": "Weapon tuning",
+        "source_url": None,
+    }
+
+    assert write_patch_event(db, event) is True
+    assert write_patch_event(db, dict(event)) is False
+    assert len(db._inserts["patch_events"]) == 1
+
+
+def test_write_patch_event_distinct_urlless_events_both_insert():
+    db = _FakeClient()
+    event = {
+        "game_id": "g1",
+        "date": "2026-07-10",
+        "patch_type": "balance",
+        "scope_summary": "Weapon tuning",
+        "source_url": None,
+    }
+    other_day = {**event, "date": "2026-07-12"}
+
+    assert write_patch_event(db, event) is True
+    assert write_patch_event(db, other_day) is True
+    assert len(db._inserts["patch_events"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# get_trade_plan_for_week / mark_trade_order_filled
+# ---------------------------------------------------------------------------
+
+def test_get_trade_plan_for_week_returns_none_when_empty():
+    db = _FakeClient()
+
+    assert get_trade_plan_for_week(db, "2026-07-13") is None
+
+
+def test_get_trade_plan_for_week_returns_existing_plan():
+    db = _FakeClient()
+    db.seed("trade_plans", [
+        {"plan_id": "p1", "week_of": "2026-07-13", "status": "pending",
+         "created_at": "2026-07-15T00:00:00Z"},
+        {"plan_id": "p-other-week", "week_of": "2026-07-06", "status": "approved",
+         "created_at": "2026-07-08T00:00:00Z"},
+    ])
+
+    plan = get_trade_plan_for_week(db, "2026-07-13")
+
+    assert plan["plan_id"] == "p1"
+
+
+def test_mark_trade_order_filled_updates_status_and_alpaca_id():
+    db = _FakeClient()
+    db.seed("trade_orders", [
+        {"order_id": "o1", "status": "approved", "alpaca_order_id": None},
+    ])
+
+    mark_trade_order_filled(db, "o1", "alpaca-xyz")
+
+    row = db._tables["trade_orders"][0]
+    assert row["status"] == "filled"
+    assert row["alpaca_order_id"] == "alpaca-xyz"
+    assert row["filled_at"]  # set to a real timestamp
 
 
 def test_write_watchlist_proposal_inserts():

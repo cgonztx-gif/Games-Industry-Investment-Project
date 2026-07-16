@@ -224,16 +224,26 @@ def update_watchlist_subreddit(
     ).eq("id", watchlist_id).execute()
 
 
-def get_last_player_metrics(client: Client, game_id: str) -> Optional[dict]:
-    """Most recent player_metrics row for a game (used for review_velocity calc)."""
-    resp = (
+def get_last_player_metrics(
+    client: Client, game_id: str, before_date: Optional[str] = None
+) -> Optional[dict]:
+    """
+    Most recent player_metrics row for a game (used for review_velocity calc).
+
+    ``before_date`` (exclusive) lets the market_player worker anchor
+    review_velocity to the previous *distinct* collection day: without it, a
+    same-day re-run would find the run's own freshly-upserted row as "prev"
+    and clobber review_velocity to ~0. Callers that want the latest row
+    including today (e.g. the sentiment worker's divergence hint) omit it.
+    """
+    query = (
         client.table("player_metrics")
         .select("review_count, date")
         .eq("game_id", game_id)
-        .order("date", desc=True)
-        .limit(1)
-        .execute()
     )
+    if before_date is not None:
+        query = query.lt("date", before_date)
+    resp = query.order("date", desc=True).limit(1).execute()
     return resp.data[0] if resp.data else None
 
 
@@ -540,15 +550,23 @@ def write_studio_signal(client: Client, signal: dict) -> bool:
     Insert one studio_signals row. Returns True if inserted, False if already exists.
     Idempotency key: studio_id + date + signal_type + source_url.
     """
-    existing = (
+    query = (
         client.table("studio_signals")
         .select("id")
         .eq("studio_id", signal["studio_id"])
         .eq("date", signal["date"])
         .eq("signal_type", signal["signal_type"])
-        .eq("source_url", signal["source_url"])
-        .execute()
     )
+    # .eq(col, None) never matches SQL NULL (PostgREST needs `is.null`), so a
+    # None source_url (e.g. an ATS hiring signal whose job posting had no URL)
+    # must be matched with .is_ or the pre-check silently passes and a re-run
+    # inserts a duplicate row.
+    source_url = signal.get("source_url")
+    if source_url is None:
+        query = query.is_("source_url", "null")
+    else:
+        query = query.eq("source_url", source_url)
+    existing = query.execute()
     if existing.data:
         return False
 
@@ -589,6 +607,24 @@ def write_patch_event(client: Client, event: dict) -> bool:
         )
         if existing.data:
             return False
+    else:
+        # No source URL to key on (rare: a Steam news item without a url).
+        # Fall back to (game_id, date, patch_type) so a re-run -- or the next
+        # weekly run, whose 45-day lookback re-sees the same item -- doesn't
+        # insert the same event again. Migration 004's unique index only
+        # covers rows WHERE source_url IS NOT NULL, so without this check
+        # url-less events would duplicate unboundedly.
+        existing = (
+            client.table("patch_events")
+            .select("id")
+            .eq("game_id", event["game_id"])
+            .eq("date", event["date"])
+            .eq("patch_type", event["patch_type"])
+            .is_("source_url", "null")
+            .execute()
+        )
+        if existing.data:
+            return False
 
     client.table("patch_events").insert(event).execute()
     return True
@@ -598,22 +634,56 @@ def write_patch_event(client: Client, event: dict) -> bool:
 # Synthesis helpers
 # ---------------------------------------------------------------------------
 
+def _latest_rows_per_key(rows: list[dict], key_fn) -> list[dict]:
+    """Keep only the most recent row (by ``date``) per key. Rows whose key is
+    None (or partially None for tuple keys) are dropped -- they can't be
+    joined to anything downstream anyway."""
+    latest: dict = {}
+    for row in rows:
+        key = key_fn(row)
+        if key is None or (isinstance(key, tuple) and any(k is None for k in key)):
+            continue
+        current = latest.get(key)
+        if current is None or (row.get("date") or "") > (current.get("date") or ""):
+            latest[key] = row
+    return list(latest.values())
+
+
 def get_weekly_outputs(client: Client, run_date: str, week_start: str) -> dict:
     """
     Read same-week worker outputs for synthesis.
 
-    Paginated via _fetch_all_rows -- player_metrics and sentiment_snapshots
-    are filtered to a single day here, but with ~4,017 active watchlist rows
-    and sentiment_snapshots writing up to 4 rows/game/day (reddit/steam/
-    youtube/news), either can plausibly exceed PostgREST's 1000-row cap on a
-    single day once most of the watchlist is tier_a; an unranged query would
-    silently truncate the briefing's input instead of raising.
+    player_metrics / sentiment_snapshots / equity_signals are read over the
+    full [week_start, run_date] window and deduplicated to the latest row per
+    game (player_metrics), per (game, source) (sentiment), and per ticker
+    (equity_signals) -- NOT filtered to ``date = run_date``. Under the
+    multi-job CI layout the collect/news/sentiment phases run hours before
+    synthesize in separate jobs, so their rows can carry the previous UTC
+    date; an exact-date filter silently returned zero rows for every earlier
+    phase whenever the chain crossed midnight, producing an empty briefing.
+
+    Paginated via _fetch_all_rows -- with ~4,017 active watchlist rows and
+    sentiment_snapshots writing up to 4 rows/game/day (reddit/steam/youtube/
+    news), each query can exceed PostgREST's 1000-row cap; an unranged query
+    would silently truncate the briefing's input instead of raising.
     """
-    player_metrics = _fetch_all_rows(
-        lambda: client.table("player_metrics").select("*").eq("date", run_date)
+    player_metrics = _latest_rows_per_key(
+        _fetch_all_rows(
+            lambda: client.table("player_metrics")
+            .select("*")
+            .gte("date", week_start)
+            .lte("date", run_date)
+        ),
+        lambda row: row.get("game_id"),
     )
-    sentiment = _fetch_all_rows(
-        lambda: client.table("sentiment_snapshots").select("*").eq("date", run_date)
+    sentiment = _latest_rows_per_key(
+        _fetch_all_rows(
+            lambda: client.table("sentiment_snapshots")
+            .select("*")
+            .gte("date", week_start)
+            .lte("date", run_date)
+        ),
+        lambda row: (row.get("game_id"), row.get("source")),
     )
     patch_events = _fetch_all_rows(
         lambda: client.table("patch_events")
@@ -627,8 +697,14 @@ def get_weekly_outputs(client: Client, run_date: str, week_start: str) -> dict:
         .gte("date", week_start)
         .lte("date", run_date)
     )
-    equity_signals = _fetch_all_rows(
-        lambda: client.table("equity_signals").select("*").eq("date", run_date)
+    equity_signals = _latest_rows_per_key(
+        _fetch_all_rows(
+            lambda: client.table("equity_signals")
+            .select("*")
+            .gte("date", week_start)
+            .lte("date", run_date)
+        ),
+        lambda row: row.get("ticker"),
     )
     return {
         "player_metrics": player_metrics or [],
@@ -657,6 +733,26 @@ def get_latest_weekly_briefing(client: Client) -> Optional[dict]:
         client.table("weekly_briefings")
         .select("*")
         .order("week_of", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def get_trade_plan_for_week(client: Client, week_of: str) -> Optional[dict]:
+    """
+    Most recent trade_plans row for a week_of, or None if none exists yet.
+
+    Used by the portfolio manager's same-week re-run guard: trade_plans has no
+    unique constraint on week_of, so without a pre-check a re-dispatched
+    synthesize phase would insert a second pending plan (plus duplicate pending
+    orders) for the same week.
+    """
+    resp = (
+        client.table("trade_plans")
+        .select("*")
+        .eq("week_of", week_of)
+        .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
@@ -696,10 +792,26 @@ def get_approved_trade_orders(client: Client) -> list[dict]:
     )
 
 
-def attach_alpaca_order_id(client: Client, order_id: str, alpaca_order_id: str) -> None:
-    client.table("trade_orders").update(
-        {"alpaca_order_id": alpaca_order_id}
-    ).eq("order_id", order_id).execute()
+def mark_trade_order_filled(
+    client: Client, order_id: str, alpaca_order_id: Optional[str] = None
+) -> None:
+    """
+    Mark a trade_orders row as placed at Alpaca: status='filled' + filled_at
+    (plus alpaca_order_id when the placement response returned one).
+
+    Called by place_approved_order immediately after a successful placement so
+    the order leaves the status='approved' pool -- without this, a re-run of
+    the synthesize phase (a first-class scenario under the multi-job CI
+    layout) would fetch the same orders via get_approved_trade_orders and
+    place them at Alpaca a second time.
+    """
+    patch: dict = {
+        "status": "filled",
+        "filled_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if alpaca_order_id:
+        patch["alpaca_order_id"] = alpaca_order_id
+    client.table("trade_orders").update(patch).eq("order_id", order_id).execute()
 
 
 _REVIEW_STATUSES = ("approved", "rejected")
