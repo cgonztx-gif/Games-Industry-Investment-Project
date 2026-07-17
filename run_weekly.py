@@ -1,5 +1,6 @@
 import argparse
 import sys
+import traceback
 from pathlib import Path
 from dotenv import load_dotenv
 from langsmith import trace
@@ -190,10 +191,40 @@ def main(argv=None):
     configure_tracing()
     trace_name = f"weekly_intel_run:{args.phase}" if args.phase else "weekly_intel_run"
     phases = [args.phase] if args.phase else PHASE_ORDER
+
+    # Per-step fault isolation: a step that raises must not abort the rest of
+    # its phase. Each worker already degrades per-item internally, but a
+    # top-level failure in one step (e.g. get_client() unreachable, or an
+    # unguarded query) would otherwise skip every later step in the same
+    # process -- e.g. a crashing step_discovery would deprive the run of the
+    # weekly briefing/portfolio steps that follow it in the synthesize phase.
+    # This mirrors step_crew's existing non-fatal wrapper and the cross-phase
+    # `!cancelled()` degrade-gracefully design in weekly.yml, extended to every
+    # step. Failures are still surfaced: they're logged with a traceback and,
+    # if any occurred, the process exits non-zero at the end (a `failure`
+    # conclusion, which weekly.yml's `!cancelled()` chain tolerates -- later
+    # phase jobs still run -- while keeping the failure visible in the Actions
+    # UI rather than silently passing).
+    failures: list[str] = []
     with trace(trace_name, run_type="chain"):
         for phase in phases:
             for step in PHASE_STEPS[phase]:
-                step()
+                try:
+                    step()
+                except Exception as exc:  # noqa: BLE001 -- deliberate catch-all for isolation
+                    failures.append(step.__name__)
+                    print(
+                        f"\n[run_weekly] STEP FAILED (non-fatal, continuing): "
+                        f"{step.__name__}: {exc}"
+                    )
+                    traceback.print_exc()
+
+    if failures:
+        print(
+            f"\n[run_weekly] {len(failures)} step(s) failed this run: "
+            f"{', '.join(failures)}"
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,55 @@
+name: tests
+
+# Automated test gate: runs the unit suite on every push to main and on PRs.
+# Before this workflow existed, the ~480-test suite ran only locally, so a
+# regression could reach the weekly intel run (weekly.yml) undetected -- the
+# worst place for it, given how fragile that pipeline's external-data phases
+# have been. This gate catches regressions and requirements/import drift before
+# they ship.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One run per ref; a newer push cancels an in-flight run for the same branch.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # match weekly.yml's runner
+          cache: pip
+
+      - name: Install test dependencies
+        # Full requirements.txt MINUS crewai + playwright. Both are heavy (a
+        # large dependency tree / a browser download) and the suite needs
+        # neither: tests/test_run_weekly_wiring.py injects a fake `crewai`
+        # module, and playwright is only lazily imported inside a studio_intel
+        # careers fallback that no unit test exercises. Filtering the real
+        # requirements file (instead of maintaining a second list) keeps this
+        # gate automatically in sync as dependencies are added, and matches the
+        # known-green local test environment (which also lacks crewai).
+        run: |
+          grep -vE '^\s*(crewai|playwright)([<>=!~ ]|$)' requirements.txt > requirements-ci.txt
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ci.txt
+
+      - name: Import smoke
+        # Fails fast on requirements/import drift before the (fast) test run --
+        # loads run_weekly's whole worker import graph in one cheap check.
+        run: python -c "import run_weekly; print('import run_weekly OK')"
+
+      - name: Run unit tests
+        run: python -m pytest -q

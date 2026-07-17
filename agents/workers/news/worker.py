@@ -98,6 +98,25 @@ def _write_matched_article(db, article: dict, matched: list[str]) -> None:
     )
 
 
+def _match_and_write(db, article: dict, entities: list[dict], disambig_cache) -> list[str]:
+    """Match one article against `entities` and write it if matched. Per-item
+    degrade: logs and returns [] on ANY error (a matcher exception or a DB
+    write failure) rather than aborting the whole news pass -- matching the
+    degrade-per-item convention every other worker's run() loop uses. This
+    matters more since the industry-query GDELT redesign pulls a much larger,
+    more varied article corpus (a single malformed article must not sink the
+    phase after all the fetching work)."""
+    try:
+        matched = resolve_matched_entities(article, entities, disambig_cache)
+        if not matched:
+            return []
+        _write_matched_article(db, article, matched)
+        return matched
+    except Exception as exc:  # noqa: BLE001 -- deliberate per-item isolation
+        print(f"[news] match/write failed for {article.get('url')!r}: {exc}")
+        return []
+
+
 def run(now_fn=time.monotonic) -> dict:
     db = get_client()
     entities = get_watchlist_entities_with_aliases(db)
@@ -151,10 +170,9 @@ def run(now_fn=time.monotonic) -> dict:
     items_written = 0
     coverage_counts: dict[str, int] = {}
     for article in unique_articles:
-        matched = resolve_matched_entities(article, entities, disambig_cache)
+        matched = _match_and_write(db, article, entities, disambig_cache)
         if not matched:
             continue
-        _write_matched_article(db, article, matched)
         items_written += 1
         for game_id in matched:
             coverage_counts[game_id] = coverage_counts.get(game_id, 0) + 1
@@ -192,10 +210,9 @@ def run(now_fn=time.monotonic) -> dict:
                 break
             continue
         for article in _dedupe_by_url(extra_articles):
-            matched = resolve_matched_entities(article, [entity], disambig_cache)
+            matched = _match_and_write(db, article, [entity], disambig_cache)
             if not matched:
                 continue
-            _write_matched_article(db, article, matched)
             items_written += 1
             coverage_counts[entity["game_id"]] = coverage_counts.get(entity["game_id"], 0) + 1
 

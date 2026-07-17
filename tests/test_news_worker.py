@@ -93,6 +93,7 @@ def _run(
     written=None,
     monkeypatch=None,
     now_fn=None,
+    write_fn=None,
 ):
     if entities is None:
         entities = [_entity()]
@@ -126,7 +127,7 @@ def _run(
     def _fake_write(db, article, matched):
         written.append({"article": article, "matched": matched})
 
-    monkeypatch.setattr(news_worker, "_write_matched_article", _fake_write)
+    monkeypatch.setattr(news_worker, "_write_matched_article", write_fn or _fake_write)
 
     if now_fn is not None:
         return news_worker.run(now_fn=now_fn)
@@ -257,6 +258,11 @@ def test_url_deduplication(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_entity_match_failure_non_fatal(monkeypatch):
+    # A single article that raises in resolve_matched_entities must NOT abort
+    # the whole news pass -- _match_and_write catches per-item and continues,
+    # matching every other worker's degrade-per-item convention. (Before the
+    # 2026-07-17 CI-hardening pass this raised straight out of the loop and
+    # killed the run.)
     entities = [_entity()]
     rss = [_article("https://ok.com/a"), _article("https://boom.com/b")]
 
@@ -267,27 +273,46 @@ def test_entity_match_failure_non_fatal(monkeypatch):
 
     written = []
 
-    # We need to patch _write_matched_article and resolve_matched_entities in
-    # the worker so the exception surfaces correctly.  Since our _run helper
-    # patches resolve_matched_entities on the module, the exception will
-    # propagate through the worker's for-loop — which does NOT catch it.
-    # This test verifies the current behavior (exception propagates) or that
-    # the worker is robust.  Check worker.py: the per-article loop has no
-    # try/except around resolve_matched_entities, so an exception there will
-    # kill the run.  This test documents that contract.
-    try:
-        _run(
-            entities=entities,
-            rss_articles=rss,
-            resolve_fn=_flaky,
-            written=written,
-            monkeypatch=monkeypatch,
-        )
-        # If no exception: at least the first article was written
-        assert len(written) >= 1
-    except RuntimeError:
-        # Also acceptable: the worker propagates the error
-        pass
+    result = _run(
+        entities=entities,
+        rss_articles=rss,
+        resolve_fn=_flaky,
+        written=written,
+        monkeypatch=monkeypatch,
+    )
+
+    # The run completes (no raise), the good article is written, the raising
+    # one is skipped rather than sinking the phase.
+    urls = [w["article"]["url"] for w in written]
+    assert urls == ["https://ok.com/a"]
+    assert result["items_written"] == 1
+
+
+def test_db_write_failure_is_per_item_non_fatal(monkeypatch):
+    # A DB write failure for one article is also isolated: the pass keeps going
+    # and later articles still get written.
+    entities = [_entity()]
+    rss = [_article("https://boom.com/a"), _article("https://ok.com/b")]
+
+    written = []
+
+    def _write_raises_on_boom(db, article, matched):
+        if "boom" in article["url"]:
+            raise RuntimeError("supabase write failed")
+        written.append({"article": article, "matched": matched})
+
+    result = _run(
+        entities=entities,
+        rss_articles=rss,
+        resolve_fn=_always_match,
+        written=written,
+        write_fn=_write_raises_on_boom,
+        monkeypatch=monkeypatch,
+    )
+
+    urls = [w["article"]["url"] for w in written]
+    assert urls == ["https://ok.com/b"]
+    assert result["items_written"] == 1
 
 
 # ---------------------------------------------------------------------------

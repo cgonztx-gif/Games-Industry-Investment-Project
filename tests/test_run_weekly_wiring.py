@@ -54,7 +54,13 @@ def _install_fake_crewai(monkeypatch, kickoff_fn):
     monkeypatch.setitem(sys.modules, "crewai", fake)
 
 
-def _run_weekly(monkeypatch, kickoff_fn, call_order: list[str], argv: list[str] | None = None):
+def _run_weekly(
+    monkeypatch,
+    kickoff_fn,
+    call_order: list[str],
+    argv: list[str] | None = None,
+    extra_patch=None,
+):
     """
     Pre-import and monkeypatch every worker/agent entrypoint on its own module
     object, then execute run_weekly.py via runpy. Its `from X import Y as Z`
@@ -144,6 +150,11 @@ def _run_weekly(monkeypatch, kickoff_fn, call_order: list[str], argv: list[str] 
     # agents.orchestrator.crew was already imported by an earlier test in
     # this process (module import is cached across the whole test session).
     monkeypatch.setattr(crew_module.games_intel_crew, "kickoff", _wrapped_kickoff)
+
+    # Optional last-mile override (e.g. make one already-patched step raise) --
+    # applied after the standard _record fakes so it wins.
+    if extra_patch is not None:
+        extra_patch()
 
     runpy.run_path(str(_ROOT / "run_weekly.py"), run_name="__main__")
 
@@ -257,3 +268,54 @@ def test_crewai_failure_is_non_fatal_in_the_synthesize_phase_too(monkeypatch):
     _run_weekly(monkeypatch, kickoff_fn=_boom, call_order=call_order, argv=["--phase", "synthesize"])
 
     assert call_order == _PHASE_EXPECTED["synthesize"]
+
+
+# ---------------------------------------------------------------------------
+# Per-step fault isolation (2026-07-17 CI-hardening pass): a step that raises
+# must not abort the rest of its phase. Before this, run_weekly.main()'s bare
+# `for step in ...: step()` let one raising step (e.g. a crashing
+# step_discovery) skip every later step in the same process -- depriving the
+# run of the weekly briefing/portfolio steps. main() now wraps each step in a
+# try/except, logs it, continues, and exits non-zero at the end so the failure
+# stays visible (weekly.yml's `!cancelled()` chain tolerates a `failure`
+# conclusion -- later phase jobs still run).
+# ---------------------------------------------------------------------------
+
+def test_raising_step_does_not_abort_the_rest_of_its_phase(monkeypatch):
+    call_order: list[str] = []
+
+    # Make the synthesis step raise; the steps after it in the synthesize phase
+    # (portfolio_manager, execution_agent, returns_tracker, crew_kickoff) must
+    # still run.
+    import agents.synthesis.agent as synthesis_agent
+
+    def _synthesis_boom(*_a, **_kw):
+        call_order.append("synthesis")
+        raise RuntimeError("synthesis blew up")
+
+    # main() exits non-zero when any step failed, which surfaces as SystemExit
+    # out of runpy.run_path.
+    with pytest.raises(SystemExit) as exc_info:
+        _run_weekly(
+            monkeypatch,
+            kickoff_fn=lambda: "crew ok",
+            call_order=call_order,
+            argv=["--phase", "synthesize"],
+            extra_patch=lambda: monkeypatch.setattr(synthesis_agent, "run", _synthesis_boom),
+        )
+
+    assert exc_info.value.code != 0  # a failed step marks the run failed
+    # Crucially, every later step in the phase still executed despite the crash.
+    assert call_order == _PHASE_EXPECTED["synthesize"]
+
+
+def test_all_steps_succeeding_exits_zero(monkeypatch):
+    call_order: list[str] = []
+
+    # No SystemExit (or SystemExit(None)/0) when everything succeeds.
+    try:
+        _run_weekly(monkeypatch, kickoff_fn=lambda: "crew ok", call_order=call_order)
+    except SystemExit as exc:  # pragma: no cover - only if a regression exits non-zero
+        assert exc.code in (None, 0)
+
+    assert call_order == _EXPECTED_ORDER
