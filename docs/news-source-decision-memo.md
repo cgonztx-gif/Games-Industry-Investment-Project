@@ -121,7 +121,7 @@ You want weekly narrative direction, not per-article scores. Batch a game's week
 **Assumed scale:** watchlist of 20–50 games, weekly cadence. (Swap in your real number; the shape holds.)
 
 **Fetch layer — $0:**
-- GDELT: 1 keyword query per entity per week = 20–50 queries/week, serialized with backoff. No daily quota; well under burst limits. Cost: $0.
+- GDELT: 1 keyword query per entity per week = 20–50 queries/week, serialized with backoff. No daily quota; well under burst limits. Cost: $0. **Superseded 2026-07-17:** the per-entity design proved structurally infeasible once the watchlist grew to ~4,017 entities (~31s/entity slow-bleed of 429s/timeouts); GDELT now issues a small *fixed* set of ~10 industry-level queries (`gdelt_client.INDUSTRY_GDELT_QUERIES`) matched to entities locally — see `CLAUDE.md`'s "News ingestion internals" GDELT bullet and `tasks.md`'s "News Worker GDELT Hang" section. Still $0.
 - Curated RSS: ~7 feeds pulled once (or a few times)/week. Trivial. Cost: $0.
 - Google News RSS (fallback, only thin-coverage entities): ≤ ~20 queries/week. Cost: $0.
 

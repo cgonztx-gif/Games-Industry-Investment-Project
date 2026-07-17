@@ -140,7 +140,11 @@ def _run(
 def test_happy_path_rss_and_gdelt(monkeypatch):
     entities = [_entity("g1", "Elden Ring")]
     rss = [_article("https://rss.com/a")]
-    gdelt = _FakeGdeltSource(articles_per_entity={'"Elden Ring"': [_article("https://gdelt.com/b")]})
+    # GDELT now issues a fixed set of industry-level queries (not per-entity);
+    # key the fake by the first of those queries.
+    gdelt = _FakeGdeltSource(
+        articles_per_entity={news_worker.INDUSTRY_GDELT_QUERIES[0]: [_article("https://gdelt.com/b")]}
+    )
     written = []
 
     result = _run(
@@ -230,7 +234,9 @@ def test_url_deduplication(monkeypatch):
     shared_url = "https://shared.com/a"
     entities = [_entity()]
     rss = [_article(shared_url)]
-    gdelt = _FakeGdeltSource(articles_per_entity={'"Elden Ring"': [_article(shared_url)]})
+    gdelt = _FakeGdeltSource(
+        articles_per_entity={news_worker.INDUSTRY_GDELT_QUERIES[0]: [_article(shared_url)]}
+    )
     written = []
 
     _run(
@@ -319,9 +325,13 @@ def test_gdelt_circuit_breaker_aborts_after_consecutive_failures(monkeypatch):
         monkeypatch=monkeypatch,
     )
 
-    # Breaker trips at the 10th consecutive failure — no reason to attempt
-    # the remaining 20 entities in a full-watchlist-scale outage.
-    assert len(gdelt.calls) == news_worker._CONSECUTIVE_FAILURE_LIMIT
+    # The GDELT loop is now over the fixed INDUSTRY_GDELT_QUERIES set, so the
+    # breaker trips at min(limit, len(queries)) consecutive failures. (On the
+    # small query set the breaker is near-vestigial defense-in-depth, but it
+    # still fires when every live query is blocked.)
+    assert len(gdelt.calls) == min(
+        news_worker._CONSECUTIVE_FAILURE_LIMIT, len(news_worker.INDUSTRY_GDELT_QUERIES)
+    )
 
 
 def test_gdelt_circuit_breaker_resets_on_success(monkeypatch):
@@ -349,9 +359,9 @@ def test_gdelt_circuit_breaker_resets_on_success(monkeypatch):
         monkeypatch=monkeypatch,
     )
 
-    # Never trips: every 10th call succeeds and resets the counter, so all
-    # 25 entities get attempted despite mostly failing.
-    assert len(gdelt.calls) == 25
+    # Never trips: a success within every 10-call window resets the counter,
+    # so every industry query gets attempted despite mostly failing.
+    assert len(gdelt.calls) == len(news_worker.INDUSTRY_GDELT_QUERIES)
 
 
 def test_gnews_circuit_breaker_aborts_after_consecutive_failures(monkeypatch):
@@ -455,7 +465,8 @@ def test_pass_under_budget_is_unaffected(monkeypatch):
         now_fn=clock.now,
     )
 
-    assert len(gdelt.calls) == 30
+    # The GDELT loop iterates the fixed query set, not the entities.
+    assert len(gdelt.calls) == len(news_worker.INDUSTRY_GDELT_QUERIES)
 
 
 def test_gnews_time_budget_is_independent_of_gdelt_pass(monkeypatch):
@@ -476,5 +487,6 @@ def test_gnews_time_budget_is_independent_of_gdelt_pass(monkeypatch):
         now_fn=clock.now,
     )
 
-    assert len(gdelt.calls) == 30  # unaffected by the gnews slowness
+    # GDELT iterates the fixed query set (all fast, well under budget).
+    assert len(gdelt.calls) == len(news_worker.INDUSTRY_GDELT_QUERIES)
     assert len(gnews.calls) == 3   # own budget, own pass start

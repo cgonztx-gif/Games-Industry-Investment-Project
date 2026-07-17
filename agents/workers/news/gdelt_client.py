@@ -31,6 +31,63 @@ _USER_AGENT = "Mozilla/5.0 (compatible; games-intel-platform/0.1; contact: cgonz
 _DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
 
+# ---------------------------------------------------------------------------
+# Industry-level query set (the news worker's GDELT pass)
+# ---------------------------------------------------------------------------
+# Redesign 2026-07-17 (see tasks.md's "News Worker GDELT Hang" section): the
+# news worker used to query GDELT once per watchlist entity ("<title>"),
+# ~4,017 queries/run -- confirmed structurally infeasible at full scale (a
+# slow ~31s/entity bleed of 429s/timeouts that no streak breaker or 90-min
+# time budget could turn into real coverage; the budget only capped damage at
+# ~4% of the watchlist). Instead the worker now issues this small FIXED set of
+# broad industry-level queries and matches the returned articles to watchlist
+# entities LOCALLY via entity_matcher.resolve_matched_entities (which already
+# runs against the full entity set for every GDELT/RSS article) -- so the
+# fetch is outlet/industry-shaped while relevance matching stays entity-shaped,
+# with zero new matching code. Google News RSS remains the per-entity
+# thin-coverage fallback (agents/workers/news/worker.py).
+#
+# GDELT DOC caps each query at 250 records, so the set is a precision/reach
+# balance (see docs/news-source-decision-memo.md):
+#   * Domain-group queries -- every returned article is inherently games news,
+#     so local matching is high-precision. Deliberately spans outlets BEYOND
+#     rss_client.CURATED_FEEDS's 7; overlap with RSS is harmless
+#     (_dedupe_by_url handles it, and GDELT reaches deeper into the week than
+#     RSS's ~20-item current window). GDELT's `domain:` matches the domain and
+#     its subdomains.
+#   * Publisher/keyword queries -- catch mainstream & financial coverage of
+#     public gaming companies that games-outlet domains miss (the platform's
+#     core signal is financial). Bound to specific games locally via the
+#     matcher's studio_name weak-match + Stage-2 disambiguation.
+# Tunable: add/re-balance queries here; nothing else needs to change.
+INDUSTRY_GDELT_QUERIES: list[str] = [
+    # --- Domain-group queries over broad games-press outlets ---
+    "(domain:ign.com OR domain:gamespot.com OR domain:polygon.com "
+    "OR domain:kotaku.com OR domain:pcgamer.com OR domain:eurogamer.net)",
+    "(domain:gamesindustry.biz OR domain:videogameschronicle.com OR domain:vg247.com "
+    "OR domain:gamedeveloper.com OR domain:rockpapershotgun.com OR domain:destructoid.com)",
+    "(domain:gamerant.com OR domain:thegamer.com OR domain:pcgamesn.com "
+    "OR domain:gamesradar.com OR domain:screenrant.com OR domain:dualshockers.com)",
+    "(domain:gematsu.com OR domain:dexerto.com OR domain:dotesports.com "
+    "OR domain:nintendolife.com OR domain:pushsquare.com OR domain:purexbox.com)",
+    "(domain:windowscentral.com OR domain:wccftech.com OR domain:toucharcade.com "
+    "OR domain:gamespew.com OR domain:gamingbolt.com OR domain:tweaktown.com)",
+    # --- Publisher / mainstream-financial keyword queries ---
+    '("Electronic Arts" OR "Take-Two" OR Ubisoft OR "Epic Games" OR Roblox '
+    'OR Krafton OR "Embracer Group" OR "CD Projekt") sourcelang:english',
+    '(Nintendo OR "Sony Interactive" OR "Xbox" OR "Activision Blizzard" '
+    'OR Capcom OR "Square Enix" OR Sega OR Bandai) sourcelang:english',
+    '"video game" (sales OR earnings OR revenue OR layoffs OR acquisition '
+    'OR studio) sourcelang:english',
+    '("live service" OR "game studio" OR "video game industry") sourcelang:english',
+    "videogame sourcelang:english",
+]
+
+# Most-recent-first, so the 250-record per-query cap keeps THIS week's news
+# rather than a relevance-ranked slice that could skew older within the window.
+_DEFAULT_SORT = "datedesc"
+
+
 class GdeltBlocked(Exception):
     """GDELT throttled us or returned an unparseable response after retries.
     Signals callers to degrade gracefully instead of failing the run."""
@@ -95,7 +152,13 @@ class GdeltSource:
         max_retries: int = 3,
         session: requests.Session | None = None,
     ) -> None:
-        self.limiter = limiter or RateLimiter()
+        # Default to polite spacing: the news worker now issues only ~10 fixed
+        # INDUSTRY_GDELT_QUERIES per run (not ~4,017 per-entity queries), so a
+        # generous inter-query interval costs at most ~a minute total yet
+        # sharply cuts GDELT's burst-429 throttling -- live-observed 2026-07-17,
+        # where back-to-back queries at ~1s spacing 429'd but a 250-article
+        # response came back clean when spaced out.
+        self.limiter = limiter or RateLimiter(min_interval=6.0, jitter=2.0)
         self.max_retries = max_retries
         self.session = session or requests.Session()
         self.session.headers.update({"User-Agent": user_agent})
@@ -105,6 +168,7 @@ class GdeltSource:
         query: str,
         timespan: str = "1w",
         max_records: int = 250,
+        sort: str = _DEFAULT_SORT,
     ) -> list[dict]:
         params = {
             "query": query,
@@ -112,6 +176,7 @@ class GdeltSource:
             "format": "json",
             "maxrecords": min(max_records, 250),
             "timespan": timespan,
+            "sort": sort,
         }
         for attempt in range(1, self.max_retries + 1):
             self.limiter.wait()

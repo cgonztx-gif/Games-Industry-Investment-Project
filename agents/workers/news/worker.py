@@ -23,21 +23,28 @@ from database.db_client import (
     write_news_item,
 )
 from agents.workers.news.entity_matcher import resolve_matched_entities
-from agents.workers.news.gdelt_client import CachedGdeltSource, GdeltBlocked, GdeltSource
+from agents.workers.news.gdelt_client import (
+    INDUSTRY_GDELT_QUERIES,
+    CachedGdeltSource,
+    GdeltBlocked,
+    GdeltSource,
+)
 from agents.workers.news.google_news_client import CachedGoogleNewsSource, GoogleNewsSource
 from agents.workers.news.rss_client import CachedRssSource, fetch_curated_feeds
 
-# Consecutive-failure circuit breaker for the per-entity GDELT/Google News
-# passes below. Both loops query one external API per watchlist entity
-# (~4,017 today); tiering the entity set was considered first (mirroring the
-# sentiment worker's tier_a/listing_only split) but rejected -- live data
-# showed 3,977/4,017 active watchlist rows are already tier_a, so it wouldn't
-# meaningfully shrink either loop. A sustained outage/throttling window (the
-# 2026-07-13 incident: ~5 hours of GDELT 429s/timeouts, run cancelled before
-# finishing) instead needs a hard stop: abort the remaining pass once this
-# many *consecutive* calls fail, rather than paying full per-entity retry
-# cost across the whole watchlist. Isolated failures (a handful of
-# entities with no real coverage) don't trip it.
+# Consecutive-failure circuit breaker for the GDELT and Google News passes
+# below. The GDELT pass is now a small FIXED set of industry-level queries
+# (INDUSTRY_GDELT_QUERIES, ~10) matched to entities locally -- NOT one query
+# per watchlist entity, which was structurally infeasible at ~4,017 queries
+# (the 2026-07-13..07-17 incident chain; see tasks.md and gdelt_client.py's
+# INDUSTRY_GDELT_QUERIES note). The Google News fallback loop is still
+# per-entity (one query per thin-coverage entity), so the breaker/budget still
+# matter most there; on the ~10-query GDELT loop they're near-vestigial but
+# kept as cheap defense-in-depth and to preserve the abort-log style.
+#
+# A sustained outage/throttling window needs a hard stop: abort the remaining
+# pass once this many *consecutive* calls fail, rather than grinding through
+# the rest at full per-call retry cost. Isolated failures don't trip it.
 #
 # The limit is enforced at two layers. The loop-level breakers below only see
 # failures that propagate out of the cached sources -- a stale-cache rescue
@@ -53,18 +60,18 @@ from agents.workers.news.rss_client import CachedRssSource, fetch_curated_feeds
 # _PASS_TIME_BUDGET_SECONDS wall-clock budget below is for.
 _CONSECUTIVE_FAILURE_LIMIT = 10
 
-# Wall-clock budget per per-entity pass (GDELT loop, Google News fallback
-# loop) -- the authoritative bound on how long either pass may run. CI run
-# 29516590262 (2026-07-16) proved the consecutive-failure breakers above do
-# not bound the phase under GDELT's *real* failure mode: the job died at
-# GitHub's 6-hour cap with zero breaker trips -- 1,037 throttled 429s and 395
-# entities exhausting retries, but successes interleaved often enough that
-# the consecutive-live-failure streak kept resetting. That's a slow bleed
-# (~45s per failed entity), not a total outage, and no streak-based counter
-# can bound it. A time budget can: once a pass has consumed its budget, the
-# remainder is aborted the same way the breakers abort, and the run moves on
-# with whatever coverage exists. The breakers stay unchanged as the fast path
-# for genuine total outages (they trip in ~minutes; the budget takes 90).
+# Wall-clock budget per pass (the GDELT query-set loop, the per-entity Google
+# News fallback loop) -- the authoritative bound on how long either pass may
+# run. CI run 29516590262 (2026-07-16) proved the consecutive-failure breakers
+# above do not bound the OLD per-entity GDELT pass under GDELT's real failure
+# mode: the job died at GitHub's 6-hour cap with zero breaker trips -- 1,037
+# throttled 429s and 395 entities exhausting retries, but successes
+# interleaved often enough that the consecutive-live-failure streak kept
+# resetting. That slow bleed (~45s per failed entity) is what the industry-
+# query redesign eliminates for GDELT; the budget stays as the authoritative
+# bound for the still-per-entity Google News fallback (and as cheap insurance
+# on the small GDELT loop). The breakers stay as the fast path for genuine
+# total outages (they trip in ~minutes; the budget takes 90).
 _PASS_TIME_BUDGET_SECONDS = 5400  # 90 min
 
 
@@ -75,10 +82,6 @@ def _dedupe_by_url(articles: list[dict]) -> list[dict]:
         if url and url not in seen:
             seen[url] = article
     return list(seen.values())
-
-
-def _gdelt_query_for_entity(entity: dict) -> str:
-    return f'"{entity["title"]}"'
 
 
 def _write_matched_article(db, article: dict, matched: list[str]) -> None:
@@ -114,28 +117,31 @@ def run(now_fn=time.monotonic) -> dict:
 
     articles: list[dict] = list(fetch_curated_feeds(rss_source))
 
+    # Industry-level GDELT pass: a small fixed set of broad games-industry
+    # queries (INDUSTRY_GDELT_QUERIES), bound to specific watchlist entities
+    # locally by resolve_matched_entities below -- NOT one query per entity.
     consecutive_gdelt_failures = 0
     gdelt_pass_start = now_fn()
-    for i, entity in enumerate(entities):
+    for i, query in enumerate(INDUSTRY_GDELT_QUERIES):
         if now_fn() - gdelt_pass_start > _PASS_TIME_BUDGET_SECONDS:
-            skipped = len(entities) - i
+            skipped = len(INDUSTRY_GDELT_QUERIES) - i
             print(
                 f"[news] GDELT: time budget ({_PASS_TIME_BUDGET_SECONDS}s) exceeded, "
-                f"aborting remaining GDELT pass ({i}/{len(entities)} attempted, "
+                f"aborting remaining GDELT pass ({i}/{len(INDUSTRY_GDELT_QUERIES)} attempted, "
                 f"{skipped} skipped)"
             )
             break
         try:
-            articles.extend(gdelt_source.search(_gdelt_query_for_entity(entity)))
+            articles.extend(gdelt_source.search(query))
             consecutive_gdelt_failures = 0
         except GdeltBlocked as exc:
-            print(f"[news] GDELT blocked for {entity['title']!r}: {exc}")
+            print(f"[news] GDELT blocked for query {query!r}: {exc}")
             consecutive_gdelt_failures += 1
             if consecutive_gdelt_failures >= _CONSECUTIVE_FAILURE_LIMIT:
-                skipped = len(entities) - i - 1
+                skipped = len(INDUSTRY_GDELT_QUERIES) - i - 1
                 print(
                     f"[news] GDELT: {consecutive_gdelt_failures} consecutive failures, "
-                    f"aborting remaining GDELT pass ({i + 1}/{len(entities)} attempted, "
+                    f"aborting remaining GDELT pass ({i + 1}/{len(INDUSTRY_GDELT_QUERIES)} attempted, "
                     f"{skipped} skipped)"
                 )
                 break
@@ -153,11 +159,11 @@ def run(now_fn=time.monotonic) -> dict:
         for game_id in matched:
             coverage_counts[game_id] = coverage_counts.get(game_id, 0) + 1
 
-    # Backfill entities GDELT + curated RSS didn't surface anything for. When
-    # the GDELT pass above circuit-breaks early, most entities never got a
-    # GDELT query at all and will show zero coverage here too -- so this loop
-    # needs the same consecutive-failure circuit breaker, or an outage just
-    # relocates from GDELT to Google News instead of being bounded.
+    # Backfill entities the industry-level GDELT pass + curated RSS didn't
+    # surface anything for -- the long tail the fixed query set can't reach
+    # under the 250-record-per-query cap. This loop is still per-entity, so it
+    # keeps its own consecutive-failure breaker + time budget (a Google News
+    # outage across the whole thin set must stay bounded).
     thin_entities = [e for e in entities if coverage_counts.get(e["game_id"], 0) < 1]
     consecutive_gnews_failures = 0
     gnews_pass_start = now_fn()

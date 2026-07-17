@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests
 
 from agents.workers.news.gdelt_client import (
+    INDUSTRY_GDELT_QUERIES,
     CachedGdeltSource,
     GdeltBlocked,
     GdeltSource,
@@ -58,6 +59,28 @@ def _fast_limiter():
 
 def _articles_response(articles):
     return _FakeResponse(200, json_data={"articles": articles})
+
+
+# ---------------------------------------------------------------------------
+# Industry-level query set (the 2026-07-17 redesign: a small FIXED set of
+# broad queries matched to entities locally, replacing ~4,017 per-entity
+# queries -- see gdelt_client.INDUSTRY_GDELT_QUERIES).
+# ---------------------------------------------------------------------------
+
+def test_industry_query_set_is_small_and_well_formed():
+    # Fixed and small (the whole point of the redesign -- not per-entity).
+    assert 0 < len(INDUSTRY_GDELT_QUERIES) <= 20
+    assert all(isinstance(q, str) and q.strip() for q in INDUSTRY_GDELT_QUERIES)
+
+
+def test_search_sorts_most_recent_first_by_default():
+    session = _FakeSession([_articles_response([])])
+    source = GdeltSource(limiter=_fast_limiter(), session=session)
+
+    source.search("query")
+
+    _, kwargs = session.calls[0]
+    assert kwargs["params"]["sort"] == "datedesc"
 
 
 # ---------------------------------------------------------------------------
