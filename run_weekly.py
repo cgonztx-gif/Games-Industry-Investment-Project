@@ -12,7 +12,6 @@ load_dotenv(_ROOT / ".env")
 
 from agents.tracing import configure_tracing, traced_step
 from agents.token_tracking import token_tracked_step
-from agents.orchestrator.crew import games_intel_crew
 from agents.synthesis import agent as synthesis_agent
 from agents.workers.financial_overlay import worker as financial_worker
 from agents.workers.market_player import worker as market_worker
@@ -137,6 +136,13 @@ def step_returns_tracker():
 def step_crew():
     _banner("Weekly CrewAI Pipeline")
     try:
+        # Lazy import: this crew is a no-op placeholder (see the except below),
+        # and crewai's dependency tree doesn't install everywhere the real
+        # pipeline runs (e.g. Python 3.14 without a C compiler for its numpy<2
+        # pin). A missing crewai must degrade like a failing crew step -- not
+        # hard-block every phase at module import time.
+        from agents.orchestrator.crew import games_intel_crew
+
         result = traced_step("games_intel_crew_kickoff", run_type="chain")(games_intel_crew.kickoff)()
         print("\nPipeline complete.")
         print(str(result).encode(sys.stdout.encoding, errors="replace").decode(sys.stdout.encoding))

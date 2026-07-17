@@ -116,6 +116,14 @@ class _Query:
         self._filters.append(("lt", col, val))
         return self
 
+    def neq(self, col, val):
+        self._filters.append(("neq", col, val))
+        return self
+
+    def in_(self, col, vals):
+        self._filters.append(("in", col, list(vals)))
+        return self
+
     def is_(self, col, val):
         # .is_("col", "null") → IS NULL filter
         self._filters.append(("is_null" if val == "null" else "eq_val", col, val))
@@ -175,6 +183,10 @@ class _Query:
             if op == "is_notnull" and row.get(col) is None:
                 return False
             if op == "eq_val" and row.get(col) != val:
+                return False
+            if op == "neq" and row.get(col) == val:
+                return False
+            if op == "in" and row.get(col) not in val:
                 return False
             if op in ("gte", "lte", "lt"):
                 cell = row.get(col)
@@ -742,3 +754,61 @@ def test_write_watchlist_proposal_inserts():
     inserted = db._inserts.get("watchlist_proposals", [])
     assert len(inserted) == 1
     assert inserted[0]["trigger_signal"] == "steam_top_ccu"
+
+
+# ---------------------------------------------------------------------------
+# .in_() chunking — regression for the URL-length 400 at mega-publisher scale
+# (confirmed live 2026-07-17: MSFT's 693 game_ids in one .in_() clause made
+# the financial overlay's health-score reads fail with a non-JSON 400).
+# ---------------------------------------------------------------------------
+
+def test_fetch_in_id_chunks_bounds_each_in_clause(monkeypatch):
+    import database.db_client as db_client_module
+
+    monkeypatch.setattr(db_client_module, "_IN_CLAUSE_CHUNK_SIZE", 2)
+    seen_chunks: list[list[str]] = []
+
+    class _Builder:
+        def __init__(self, chunk):
+            self.chunk = chunk
+
+        def range(self, start, end):
+            return self
+
+        def execute(self):
+            return _Result([{"game_id": gid} for gid in self.chunk])
+
+    def query_fn(chunk):
+        seen_chunks.append(list(chunk))
+        return _Builder(chunk)
+
+    rows = db_client_module._fetch_in_id_chunks(["a", "b", "c", "d", "e"], query_fn)
+
+    assert seen_chunks == [["a", "b"], ["c", "d"], ["e"]]
+    assert [r["game_id"] for r in rows] == ["a", "b", "c", "d", "e"]
+
+
+def test_get_recent_community_sentiment_unions_chunks_and_excludes_news(monkeypatch):
+    import database.db_client as db_client_module
+    from database.db_client import get_recent_community_sentiment_for_games
+
+    monkeypatch.setattr(db_client_module, "_IN_CLAUSE_CHUNK_SIZE", 2)
+
+    db = _FakeClient()
+    db.seed("sentiment_snapshots", [
+        {"game_id": "g1", "date": "2026-07-15", "source": "steam", "sentiment_score": 7.0},
+        {"game_id": "g2", "date": "2026-07-15", "source": "reddit", "sentiment_score": 4.0},
+        {"game_id": "g3", "date": "2026-07-15", "source": "youtube", "sentiment_score": 6.0},
+        {"game_id": "g3", "date": "2026-07-15", "source": "news", "sentiment_score": 9.0},
+        {"game_id": "g-old", "date": "2026-01-01", "source": "steam", "sentiment_score": 2.0},
+    ])
+
+    rows = get_recent_community_sentiment_for_games(
+        db, ["g1", "g2", "g3"], since_date="2026-07-01"
+    )
+
+    # All three games' rows survive the 2-id chunking (2 chunks unioned)...
+    assert {r["game_id"] for r in rows} == {"g1", "g2", "g3"}
+    # ...news rows and out-of-window rows are still excluded.
+    assert all(r["sentiment_score"] != 9.0 for r in rows)
+    assert len(rows) == 3

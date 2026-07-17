@@ -324,20 +324,44 @@ def write_equity_metrics(client: Client, metrics: dict) -> None:
     client.table("equity_signals").upsert(metrics, on_conflict="ticker,date").execute()
 
 
+# Max ids per .in_() clause. PostgREST encodes .in_() into the request URL, so
+# a large id list blows the server's URL-length limit and the whole query fails
+# with a non-JSON 400 "Bad Request" (postgrest-py surfaces it as "JSON could
+# not be generated"). Confirmed live 2026-07-17: MSFT's 693 active watchlist
+# games (~27KB of UUIDs in one URL) failed exactly this way in the financial
+# overlay worker, while TTWO's 125 fit fine. Same fix and size as the
+# dashboard's GAME_FETCH_CHUNK_SIZE (dashboard/src/lib/data/signals.ts).
+_IN_CLAUSE_CHUNK_SIZE = 150
+
+
+def _fetch_in_id_chunks(ids: list[str], query_fn) -> list[dict]:
+    """
+    Run ``query_fn(chunk)`` for each <=_IN_CLAUSE_CHUNK_SIZE slice of ``ids``
+    and union the rows. ``query_fn`` must return a fresh, unexecuted builder
+    for the given chunk; each chunk is additionally paginated through
+    _fetch_all_rows so a dense chunk can't silently truncate at PostgREST's
+    1000-row cap either.
+    """
+    rows: list[dict] = []
+    for start in range(0, len(ids), _IN_CLAUSE_CHUNK_SIZE):
+        chunk = ids[start : start + _IN_CLAUSE_CHUNK_SIZE]
+        rows.extend(_fetch_all_rows(lambda: query_fn(chunk)))
+    return rows
+
+
 def get_recent_player_metrics_for_games(
     client: Client, game_ids: list[str], since_date: str
 ) -> list[dict]:
     """player_metrics rows for these games on/after since_date, for health-score momentum."""
     if not game_ids:
         return []
-    resp = (
-        client.table("player_metrics")
+    return _fetch_in_id_chunks(
+        list(game_ids),
+        lambda chunk: client.table("player_metrics")
         .select("game_id, date, concurrent_players")
-        .in_("game_id", game_ids)
-        .gte("date", since_date)
-        .execute()
+        .in_("game_id", chunk)
+        .gte("date", since_date),
     )
-    return resp.data or []
 
 
 def get_recent_community_sentiment_for_games(
@@ -351,15 +375,14 @@ def get_recent_community_sentiment_for_games(
     """
     if not game_ids:
         return []
-    resp = (
-        client.table("sentiment_snapshots")
+    return _fetch_in_id_chunks(
+        list(game_ids),
+        lambda chunk: client.table("sentiment_snapshots")
         .select("game_id, date, sentiment_score")
-        .in_("game_id", game_ids)
+        .in_("game_id", chunk)
         .neq("source", "news")
-        .gte("date", since_date)
-        .execute()
+        .gte("date", since_date),
     )
-    return resp.data or []
 
 
 def get_recent_patch_events_for_games(
@@ -368,14 +391,13 @@ def get_recent_patch_events_for_games(
     """patch_events rows for these games on/after since_date, for cadence-status input."""
     if not game_ids:
         return []
-    resp = (
-        client.table("patch_events")
+    return _fetch_in_id_chunks(
+        list(game_ids),
+        lambda chunk: client.table("patch_events")
         .select("game_id, date, cadence_status")
-        .in_("game_id", game_ids)
-        .gte("date", since_date)
-        .execute()
+        .in_("game_id", chunk)
+        .gte("date", since_date),
     )
-    return resp.data or []
 
 
 def get_recent_studio_signals_for_studios(
@@ -384,14 +406,13 @@ def get_recent_studio_signals_for_studios(
     """studio_signals rows for these studios on/after since_date, for distress input."""
     if not studio_ids:
         return []
-    resp = (
-        client.table("studio_signals")
+    return _fetch_in_id_chunks(
+        list(studio_ids),
+        lambda chunk: client.table("studio_signals")
         .select("studio_id, date, severity")
-        .in_("studio_id", studio_ids)
-        .gte("date", since_date)
-        .execute()
+        .in_("studio_id", chunk)
+        .gte("date", since_date),
     )
-    return resp.data or []
 
 
 # ---------------------------------------------------------------------------
