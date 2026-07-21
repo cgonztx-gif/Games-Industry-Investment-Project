@@ -19,6 +19,7 @@ Prerequisites:
     get_recent_news_items() has matched articles to read.
 """
 
+import time
 from datetime import date, timedelta
 
 from database.api_cache import SupabaseApiCache
@@ -52,6 +53,19 @@ _NEWS_LOOKBACK_DAYS = 7
 
 _MIN_TEXTS_FOR_ABSA = 5
 _TIER_A_COMMENT_POSTS = 10
+
+# Wall-clock budget for the per-game loop. Each game runs LLM calls (Haiku
+# ABSA on community text, Haiku/Sonnet news-stance), so on a cold cache the
+# full ~4,000-game watchlist can run for hours -- CI run 29607547902's
+# sentiment phase ran to GitHub's `timeout-minutes: 350` cap and was
+# hard-killed (SIGTERM mid-write, `failure` conclusion, no clean summary).
+# Unlike the news worker's three passes that share one job, sentiment is the
+# SOLE pass in its own 350-min-capped job, so it gets a larger budget: 300 min
+# leaves ~50 min of margin under the cap for a clean abort-and-degrade (break
+# the loop, write the summary, return `success` with partial coverage) instead
+# of the dirty kill. Games are processed tier_a-first (see run()) so if the
+# budget does fire, the high-value games are the ones that got covered.
+_PASS_TIME_BUDGET_SECONDS = 18000  # 300 min
 
 
 def _write_source_snapshot(
@@ -169,12 +183,18 @@ def _reddit_texts_for_game(reddit_source, subreddit: str, sentiment_tier: str) -
     return texts
 
 
-def run() -> dict:
+def run(now_fn=time.monotonic) -> dict:
     db = get_client()
     today_date = date.today()
     today = today_date.isoformat()
     news_since = (today_date - timedelta(days=_NEWS_LOOKBACK_DAYS)).isoformat()
     games = get_watchlist_games(db)
+
+    # Process tier_a (high-value) games first, so if the wall-clock budget
+    # below fires mid-watchlist the games that got covered are the important
+    # ones, not whatever happened to be last in watchlist order. Stable sort
+    # keeps the existing order within each tier.
+    games = sorted(games, key=lambda g: 0 if (g.get("sentiment_tier") or "listing_only") == "tier_a" else 1)
 
     lookup_cache = SupabaseRedditCache(client=db, source="subreddit_lookup")
     steam_cache = SupabaseApiCache(client=db, source="steam_review_text")
@@ -188,8 +208,18 @@ def run() -> dict:
     skipped_no_data = 0
     reddit_blocked_count = 0
     first_reddit_block_reason: str | None = None
+    budget_exhausted = False
 
+    pass_start = now_fn()
     for i, game in enumerate(games):
+        if now_fn() - pass_start > _PASS_TIME_BUDGET_SECONDS:
+            budget_exhausted = True
+            skipped = len(games) - i
+            print(
+                f"[sentiment] time budget ({_PASS_TIME_BUDGET_SECONDS}s) exceeded, "
+                f"aborting remaining games ({i}/{len(games)} attempted, {skipped} skipped)"
+            )
+            break
         if i % 10 == 0:
             print(f"[sentiment] Progress: {i}/{len(games)}")
 
@@ -287,9 +317,10 @@ def run() -> dict:
             "degraded for this run — other sources (Steam, YouTube) are unaffected."
         )
 
+    budget_note = " (time budget exhausted — partial coverage)" if budget_exhausted else ""
     print(
         f"[sentiment] Done - {len(processed)} games written, "
-        f"{skipped_no_data} skipped (no data), {len(errors)} errors."
+        f"{skipped_no_data} skipped (no data), {len(errors)} errors{budget_note}."
     )
     return {
         "date": today,
@@ -298,4 +329,5 @@ def run() -> dict:
         "error_count": len(errors),
         "errors": errors,
         "reddit_blocked_count": reddit_blocked_count,
+        "budget_exhausted": budget_exhausted,
     }

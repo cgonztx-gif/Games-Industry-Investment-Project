@@ -167,9 +167,28 @@ def run(now_fn=time.monotonic) -> dict:
 
     unique_articles = _dedupe_by_url(articles)
 
+    # The entity-matching pass runs a cached Haiku disambiguation call per
+    # ambiguous (article, entity) pair, so on a cold `news_disambiguation`
+    # cache it is LLM-bound and slow over the industry-query redesign's larger
+    # ~2,300-article corpus (~144 min in CI run 29607547902). Give it the same
+    # wall-clock budget the GDELT/Google-News passes have, measured from its
+    # own start, so it aborts-and-degrades cleanly instead of pushing the news
+    # job toward the 6-hour/timeout-minutes cap. Aborting early just leaves
+    # coverage_counts partial -> more entities look "thin" -> the (also
+    # budgeted) Google-News fallback below picks them up, and the warmed cache
+    # makes the next run fast.
     items_written = 0
     coverage_counts: dict[str, int] = {}
-    for article in unique_articles:
+    match_pass_start = now_fn()
+    for i, article in enumerate(unique_articles):
+        if now_fn() - match_pass_start > _PASS_TIME_BUDGET_SECONDS:
+            skipped = len(unique_articles) - i
+            print(
+                f"[news] matching: time budget ({_PASS_TIME_BUDGET_SECONDS}s) exceeded, "
+                f"aborting remaining matching pass ({i}/{len(unique_articles)} attempted, "
+                f"{skipped} skipped)"
+            )
+            break
         matched = _match_and_write(db, article, entities, disambig_cache)
         if not matched:
             continue

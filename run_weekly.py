@@ -69,10 +69,11 @@ def step_news():
 def step_sentiment():
     _banner("Sentiment Analysis (Reddit + Steam + News)")
     sentiment_result = traced_step("sentiment_worker")(token_tracked_step("sentiment_worker")(sentiment_worker.run))()
+    budget_note = " | BUDGET EXHAUSTED (partial coverage)" if sentiment_result.get("budget_exhausted") else ""
     print(
         f"Sentiment: {sentiment_result['games_processed']} games written | "
         f"{sentiment_result['error_count']} errors | "
-        f"reddit_blocked={sentiment_result['reddit_blocked_count']}"
+        f"reddit_blocked={sentiment_result['reddit_blocked_count']}{budget_note}"
     )
 
 

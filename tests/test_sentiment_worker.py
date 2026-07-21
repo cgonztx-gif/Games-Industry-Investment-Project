@@ -66,6 +66,8 @@ def _run(
     written=None,
     subreddit_updates=None,
     monkeypatch=None,
+    now_fn=None,
+    get_last_player_metrics_fn=None,
 ):
     if games is None:
         games = [_game()]
@@ -104,7 +106,9 @@ def _run(
         sentiment_worker, "update_watchlist_subreddit", lambda db, wid, sub: subreddit_updates.append((wid, sub))
     )
     monkeypatch.setattr(
-        sentiment_worker, "get_last_player_metrics", lambda db, gid: last_player_metrics.get(gid)
+        sentiment_worker,
+        "get_last_player_metrics",
+        get_last_player_metrics_fn or (lambda db, gid: last_player_metrics.get(gid)),
     )
     monkeypatch.setattr(sentiment_worker, "fetch_steam_reviews", lambda app_id, num_per_page=50, cache=None: steam_reviews)
     monkeypatch.setattr(
@@ -131,6 +135,8 @@ def _run(
 
     monkeypatch.setattr(sentiment_worker, "write_sentiment_snapshot", _fake_write)
 
+    if now_fn is not None:
+        return sentiment_worker.run(now_fn=now_fn)
     return sentiment_worker.run()
 
 
@@ -321,3 +327,94 @@ def test_empty_watchlist_returns_zeroed_stats(monkeypatch):
     assert result["skipped_no_data"] == 0
     assert result["error_count"] == 0
     assert result["reddit_blocked_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Wall-clock budget (2026-07-21): the per-game loop makes LLM calls (ABSA,
+# news stance), so on a cold cache it can run to GitHub's timeout-minutes cap
+# and get hard-killed (CI run 29607547902's sentiment phase). It now carries a
+# budget so it aborts-and-degrades cleanly. A fake clock advanced per game
+# consumes the budget without any real sleeping.
+# ---------------------------------------------------------------------------
+
+class _FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def now(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
+
+
+def test_sentiment_time_budget_aborts_mid_watchlist(monkeypatch):
+    clock = _FakeClock()
+    games = [_game(f"g{i}", f"Game {i}", steam_app_id=str(1000 + i)) for i in range(30)]
+    steam_reviews = [{"text": "great", "score": 1}]
+    written = []
+
+    # get_last_player_metrics runs once at the top of every game's work; use it
+    # to burn 8000s of fake clock per game. Budget 18000 -> aborts at the 3rd.
+    def _slow_player_metrics(db, gid):
+        clock.advance(8000)
+        return None
+
+    result = _run(
+        games=games,
+        steam_reviews=steam_reviews,
+        written=written,
+        monkeypatch=monkeypatch,
+        now_fn=clock.now,
+        get_last_player_metrics_fn=_slow_player_metrics,
+    )
+
+    # i=0 (elapsed 0) and i=1 (8000) and i=2 (16000) run; i=3's pre-check
+    # (24000 > 18000) aborts. So 3 games processed, 27 never attempted.
+    assert result["budget_exhausted"] is True
+    assert result["games_processed"] == 3
+    processed_ids = {w["game_id"] for w in written}
+    assert processed_ids == {"g0", "g1", "g2"}
+
+
+def test_under_budget_run_sets_no_budget_flag(monkeypatch):
+    clock = _FakeClock()
+    games = [_game(f"g{i}", f"Game {i}", steam_app_id=str(1000 + i)) for i in range(5)]
+    steam_reviews = [{"text": "great", "score": 1}]
+
+    def _fast_player_metrics(db, gid):
+        clock.advance(10)  # 5 games * 10s = 50s, well under 18000
+        return None
+
+    result = _run(
+        games=games,
+        steam_reviews=steam_reviews,
+        monkeypatch=monkeypatch,
+        now_fn=clock.now,
+        get_last_player_metrics_fn=_fast_player_metrics,
+    )
+
+    assert result["budget_exhausted"] is False
+    assert result["games_processed"] == 5
+
+
+def test_tier_a_games_processed_before_listing_only(monkeypatch):
+    # Listed listing_only-first, but tier_a must run first so a budget-abort
+    # protects the high-value games.
+    games = [
+        _game("g1", "Low Priority", steam_app_id="111", sentiment_tier="listing_only"),
+        _game("g2", "High Priority", steam_app_id="222", sentiment_tier="tier_a"),
+    ]
+    steam_reviews = [{"text": "great", "score": 1}]
+    written = []
+
+    _run(
+        games=games,
+        steam_reviews=steam_reviews,
+        written=written,
+        monkeypatch=monkeypatch,
+    )
+
+    # The first snapshot written belongs to the tier_a game despite it being
+    # last in the input order.
+    assert written[0]["game_id"] == "g2"

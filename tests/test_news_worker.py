@@ -515,3 +515,31 @@ def test_gnews_time_budget_is_independent_of_gdelt_pass(monkeypatch):
     # GDELT iterates the fixed query set (all fast, well under budget).
     assert len(gdelt.calls) == len(news_worker.INDUSTRY_GDELT_QUERIES)
     assert len(gnews.calls) == 3   # own budget, own pass start
+
+
+def test_matching_pass_time_budget_aborts_mid_pass(monkeypatch):
+    # The entity-matching pass (Haiku disambiguation per article) is LLM-bound
+    # on a cold cache; it now carries its own wall-clock budget so it can't push
+    # the news job toward the timeout cap. A "slow" matcher burns fake clock so
+    # the budget fires without any real sleeping.
+    clock = _FakeClock()
+    entities = [_entity("g1", "Elden Ring")]
+    rss = [_article(f"https://ex.com/{n}") for n in range(30)]
+    matched_calls = []
+
+    def _slow_resolve(article, entities_list, cache):
+        matched_calls.append(article["url"])
+        clock.advance(2000)  # 2000s/article; budget 5400 -> aborts at the 4th
+        return []
+
+    _run(
+        entities=entities,
+        rss_articles=rss,
+        resolve_fn=_slow_resolve,
+        monkeypatch=monkeypatch,
+        now_fn=clock.now,
+    )
+
+    # 3 articles attempted (elapsed 0, 2000, 4000 all under 5400), then the 4th
+    # iteration's pre-check (6000 > 5400) aborts the pass.
+    assert len(matched_calls) == 3
