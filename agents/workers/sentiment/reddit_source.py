@@ -660,6 +660,17 @@ _CACHE_NAMESPACE_BY_TYPE = {
     OAuthRedditSource: "reddit_oauth",
 }
 
+# Posts/comments cache lifetime. The pipeline runs weekly, so a sub-week TTL
+# (the old 24h default) meant every Reddit-active game re-fetched its top-of-week
+# post listing on every single run -- 1 billed ScrapeOps request/game/week that
+# the cache could never prevent. 10 days sits between the 7-day (intermediate run
+# still hits cache, ~3-day margin) and 14-day (biweekly run misses and re-fetches,
+# ~4-day margin) marks, so a game's posts are re-fetched every *other* weekly run
+# -- roughly halving recurring post-fetch spend. Directionally consistent with the
+# data: timeframe="week" top posts are a slow signal. Bump toward 24*20 for
+# monthly refresh if spend still runs high.
+_POSTS_TTL_HOURS = 24 * 10
+
 
 def build_reddit_source(cache_factory: Callable[[str], RedditCache]) -> RedditSource:
     """cache_factory: Callable[[str], RedditCache]. Returns a single CachedRedditSource
@@ -671,7 +682,11 @@ def build_reddit_source(cache_factory: Callable[[str], RedditCache]) -> RedditSo
         return NullRedditSource()
     leaves = _build_leaf_sources()
     wrapped = [
-        CachedRedditSource(leaf, cache_factory(_CACHE_NAMESPACE_BY_TYPE[type(leaf)]))
+        CachedRedditSource(
+            leaf,
+            cache_factory(_CACHE_NAMESPACE_BY_TYPE[type(leaf)]),
+            ttl_hours=_POSTS_TTL_HOURS,
+        )
         for leaf in leaves
     ]
     return wrapped[0] if len(wrapped) == 1 else FirstAvailableRedditSource(wrapped)

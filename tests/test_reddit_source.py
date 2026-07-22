@@ -36,6 +36,7 @@ from agents.workers.sentiment.reddit_source import (
     RateLimiter,
     RedditBlocked,
     RedditPost,
+    _POSTS_TTL_HOURS,
     _build_leaf_sources,
     build_reddit_source,
     build_subreddit_resolver,
@@ -653,6 +654,29 @@ def test_build_reddit_source_no_vars_returns_bare_cached_json(monkeypatch):
     assert type(source) is CachedRedditSource
     assert type(source.inner) is JsonRedditSource
     assert calls == ["reddit"]
+
+
+def test_build_reddit_source_wraps_with_posts_ttl_spanning_weekly_cadence(monkeypatch):
+    """The posts cache TTL must exceed the 168h (7-day) run cadence, otherwise
+    every Reddit-active game re-fetches its post listing on every weekly run
+    (1 billed ScrapeOps request/game/week the cache can never prevent). The
+    bare CachedRedditSource default is 24h; build_reddit_source overrides it to
+    _POSTS_TTL_HOURS so a run reuses the prior run's cached posts (biweekly)."""
+    _clear_env(monkeypatch)
+    source = build_reddit_source(lambda ns: InMemoryRedditCache())
+    assert type(source) is CachedRedditSource
+    assert source.ttl_hours == _POSTS_TTL_HOURS
+    assert _POSTS_TTL_HOURS > 168  # spans the weekly cadence
+
+
+def test_build_reddit_source_applies_posts_ttl_to_every_leaf(monkeypatch):
+    """With multiple egress leaves each wrapped CachedRedditSource gets the same
+    extended TTL -- the biweekly saving must not depend on which leaf is active."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("REDDIT_PROXY_URL", "http://proxy.example:8080")
+    source = build_reddit_source(lambda ns: InMemoryRedditCache())
+    assert isinstance(source, FirstAvailableRedditSource)
+    assert all(s.ttl_hours == _POSTS_TTL_HOURS for s in source.sources)
 
 
 def test_build_reddit_source_proxy_only_returns_two_element_chain_in_order(monkeypatch):

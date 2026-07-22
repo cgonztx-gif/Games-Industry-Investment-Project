@@ -20,13 +20,21 @@ from agents.workers.sentiment.reddit_source import RedditBlocked
 _FAKE_DB = object()  # sentinel -- no real Supabase calls
 
 
-def _game(game_id="g1", title="Elden Ring", steam_app_id="1245620", subreddit="Eldenring", sentiment_tier="tier_a"):
+def _game(
+    game_id="g1",
+    title="Elden Ring",
+    steam_app_id="1245620",
+    subreddit="Eldenring",
+    sentiment_tier="tier_a",
+    ticker="EG",
+):
     return {
         "game_id": game_id,
         "title": title,
         "steam_app_id": steam_app_id,
         "subreddit": subreddit,
         "sentiment_tier": sentiment_tier,
+        "ticker": ticker,
         "watchlist_id": f"w-{game_id}",
     }
 
@@ -296,6 +304,75 @@ def test_real_subreddit_resolution_is_persisted(monkeypatch):
     )
 
     assert subreddit_updates == [("w-g1", "Eldenring")]
+
+
+# ---------------------------------------------------------------------------
+# Equity-mapped Reddit gate (ScrapeOps cost control)
+# ---------------------------------------------------------------------------
+
+def test_reddit_fetched_for_equity_mapped_game(monkeypatch):
+    """An equity-mapped game (watchlist row has a ticker) with a resolved
+    subreddit and posts still produces a reddit snapshot -- the gate must not
+    starve the games we actually want Reddit sentiment for."""
+    games = [_game("g1", "Elden Ring", steam_app_id=None, subreddit="Eldenring", ticker="EG")]
+    reddit = _FakeRedditSource(posts=[_post()])
+    written = []
+
+    _run(games=games, reddit_source=reddit, written=written, monkeypatch=monkeypatch)
+
+    assert "reddit" in {w["source"] for w in written}
+
+
+def test_reddit_skipped_for_non_equity_game(monkeypatch):
+    """A game whose watchlist row has no ticker (not equity-mapped) must skip
+    Reddit entirely -- no subreddit resolution, no post fetch, no reddit
+    snapshot. Reddit is the only ScrapeOps-billed source, so sentiment that
+    can't feed a financial signal isn't worth the residential-proxy cost. A
+    resolvable subreddit is deliberately made available to prove the gate
+    short-circuits *before* resolution/fetch, not merely at the fetch step."""
+    resolve_calls = []
+    fetch_calls = []
+
+    class _CountingReddit:
+        def fetch_posts(self, subreddit, sort="top", timeframe="week", limit=50):
+            fetch_calls.append(subreddit)
+            return [_post()]
+
+        def fetch_comments(self, post_id, subreddit, limit=100):
+            return []
+
+    def _counting_resolve(title, resolver, cache):
+        resolve_calls.append(title)
+        return "Eldenring"
+
+    games = [_game("g1", "Elden Ring", steam_app_id=None, subreddit=None, ticker=None)]
+    written = []
+
+    monkeypatch.setattr(sentiment_worker, "get_client", lambda: _FAKE_DB)
+    monkeypatch.setattr(sentiment_worker, "get_watchlist_games", lambda db: games)
+    monkeypatch.setattr(sentiment_worker, "SupabaseApiCache", lambda client, source: None)
+    monkeypatch.setattr(sentiment_worker, "SupabaseRedditCache", lambda client, source: None)
+    monkeypatch.setattr(sentiment_worker, "load_game_youtube_playlists", lambda: {})
+    monkeypatch.setattr(sentiment_worker, "build_subreddit_resolver", lambda: None)
+    monkeypatch.setattr(sentiment_worker, "build_reddit_source", lambda cache_factory: _CountingReddit())
+    monkeypatch.setattr(sentiment_worker, "cached_resolve_subreddit", _counting_resolve)
+    monkeypatch.setattr(sentiment_worker, "update_watchlist_subreddit", lambda db, wid, sub: None)
+    monkeypatch.setattr(sentiment_worker, "get_last_player_metrics", lambda db, gid: None)
+    monkeypatch.setattr(sentiment_worker, "fetch_steam_reviews", lambda app_id, num_per_page=50, cache=None: [])
+    monkeypatch.setattr(
+        sentiment_worker, "fetch_youtube_comments", lambda title, cache=None, game_playlist_ids=None: []
+    )
+    monkeypatch.setattr(sentiment_worker, "get_recent_news_items", lambda db, gid, since: [])
+    monkeypatch.setattr(sentiment_worker, "classify_stance", lambda title, items, sentiment_tier: None)
+    monkeypatch.setattr(sentiment_worker, "run_absa", lambda title, source, texts: [])
+    monkeypatch.setattr(sentiment_worker, "write_sentiment_snapshot", lambda db, snap: written.append(snap))
+
+    result = sentiment_worker.run()
+
+    assert resolve_calls == []  # gate short-circuits before resolution
+    assert fetch_calls == []  # ... and before any billed post fetch
+    assert "reddit" not in {w["source"] for w in written}
+    assert result["reddit_blocked_count"] == 0
 
 
 def test_game_with_zero_data_across_all_sources_is_skipped(monkeypatch):

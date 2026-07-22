@@ -189,7 +189,7 @@ def get_watchlist_games(client: Client) -> list[dict]:
     rows = _fetch_all_rows(
         lambda: client.table("watchlist")
         .select(
-            "id, game_id, sentiment_tier, subreddit, "
+            "id, game_id, sentiment_tier, subreddit, ticker, "
             "games(game_id, title, steam_app_id, igdb_id, genre, release_date, is_live_service)"
         )
         .eq("active", True)
@@ -205,6 +205,7 @@ def get_watchlist_games(client: Client) -> list[dict]:
                     "watchlist_game_id": row["game_id"],
                     "sentiment_tier": row.get("sentiment_tier") or "listing_only",
                     "subreddit": row.get("subreddit"),
+                    "ticker": row.get("ticker"),
                 }
             )
     return result

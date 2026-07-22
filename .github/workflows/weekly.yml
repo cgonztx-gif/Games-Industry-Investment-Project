@@ -44,6 +44,12 @@ env:
   STEAM_API_KEY:        ${{ secrets.STEAM_API_KEY }}
   REDDIT_PROXY_URL:          ${{ secrets.REDDIT_PROXY_URL }}
   REDDIT_PROXY_INSECURE_SSL: ${{ secrets.REDDIT_PROXY_INSECURE_SSL }}
+  # Reddit egress bills ScrapeOps credits per request, so only spend on the
+  # scheduled weekly production run. Manual workflow_dispatch (verification/CI)
+  # runs pause Reddit -> NullRedditSource, zero network I/O; both the sentiment
+  # and discovery workers already degrade cleanly, exactly like a real block.
+  # "false" for the Monday cron (proxy live), "true" otherwise (paused).
+  REDDIT_SOURCE_PAUSED: ${{ github.event_name != 'schedule' }}
   LANGSMITH_API_KEY:    ${{ secrets.LANGSMITH_API_KEY }}
   LANGSMITH_PROJECT:    ${{ secrets.LANGSMITH_PROJECT }}
   YOUTUBE_API_KEY:      ${{ secrets.YOUTUBE_API_KEY }}

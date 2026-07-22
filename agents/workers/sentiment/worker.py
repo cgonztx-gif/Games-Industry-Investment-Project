@@ -268,28 +268,38 @@ def run(now_fn=time.monotonic) -> dict:
                     player_metrics=player_metrics,
                 ) or wrote_any
 
+            # Reddit is the only ScrapeOps-billed source, so only pay for it on
+            # equity-mapped games -- ones whose watchlist row has a tracked
+            # ticker. Sentiment that can't feed a financial signal isn't worth
+            # the residential-proxy cost, and this caps the Reddit-active set to
+            # the (small) tracked-equity universe instead of growing with the
+            # full watchlist as subreddits get backfilled. Non-equity games skip
+            # both subreddit resolution and post-fetching. A read-time gate only:
+            # nothing is persisted, so a game becomes eligible automatically if
+            # it later gains a ticker (no risk of a sticky-sentinel freeze).
             try:
-                subreddit = _resolve_subreddit_for_game(
-                    db,
-                    game,
-                    subreddit_resolver,
-                    lookup_cache,
-                )
-                if subreddit:
-                    reddit_texts = _reddit_texts_for_game(
-                        reddit_source,
-                        subreddit,
-                        sentiment_tier,
-                    )
-                    wrote_any = _write_source_snapshot(
+                if game.get("ticker"):
+                    subreddit = _resolve_subreddit_for_game(
                         db,
-                        game_id=game_id,
-                        title=title,
-                        today=today,
-                        source="reddit",
-                        texts_with_weights=reddit_texts,
-                        player_metrics=player_metrics,
-                    ) or wrote_any
+                        game,
+                        subreddit_resolver,
+                        lookup_cache,
+                    )
+                    if subreddit:
+                        reddit_texts = _reddit_texts_for_game(
+                            reddit_source,
+                            subreddit,
+                            sentiment_tier,
+                        )
+                        wrote_any = _write_source_snapshot(
+                            db,
+                            game_id=game_id,
+                            title=title,
+                            today=today,
+                            source="reddit",
+                            texts_with_weights=reddit_texts,
+                            player_metrics=player_metrics,
+                        ) or wrote_any
             except RedditBlocked as exc:
                 reddit_blocked_count += 1
                 if first_reddit_block_reason is None:

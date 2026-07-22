@@ -401,6 +401,38 @@ def test_get_watchlist_games_returns_rows_beyond_a_single_page(monkeypatch):
     assert {r["game_id"] for r in result} == {f"g{i}" for i in range(5)}
 
 
+def test_get_watchlist_games_surfaces_ticker_for_equity_gate():
+    """The sentiment worker gates ScrapeOps-billed Reddit collection on a game's
+    ticker (equity-mapped games only), so get_watchlist_games must surface the
+    watchlist row's ticker -- NULL for a non-equity game."""
+    db = _FakeClient()
+    db.seed(
+        "watchlist",
+        [
+            {
+                "id": "w1",
+                "game_id": "g1",
+                "active": True,
+                "ticker": "TTWO",
+                "games": {"game_id": "g1", "title": "Equity Game"},
+            },
+            {
+                "id": "w2",
+                "game_id": "g2",
+                "active": True,
+                "ticker": None,
+                "games": {"game_id": "g2", "title": "Non-Equity Game"},
+            },
+        ],
+    )
+
+    result = get_watchlist_games(db)
+
+    by_id = {r["game_id"]: r for r in result}
+    assert by_id["g1"]["ticker"] == "TTWO"
+    assert by_id["g2"]["ticker"] is None
+
+
 # ---------------------------------------------------------------------------
 # get_active_watchlist_external_ids
 # ---------------------------------------------------------------------------
