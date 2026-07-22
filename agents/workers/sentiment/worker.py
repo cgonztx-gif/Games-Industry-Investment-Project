@@ -52,7 +52,16 @@ from agents.workers.sentiment.youtube_client import (
 _NEWS_LOOKBACK_DAYS = 7
 
 _MIN_TEXTS_FOR_ABSA = 5
-_TIER_A_COMMENT_POSTS = 10
+
+# How many of a tier_a game's top posts also get their comments fetched. Each
+# comment fetch is a separate Reddit request (billed through the ScrapeOps
+# residential proxy), and comments were ~87% of this pipeline's recurring
+# Reddit proxy spend -- so this is the dominant ScrapeOps cost lever. Set to 0
+# (2026-07-22) to DROP comment fetching entirely for credit control: sentiment
+# is now scored from post titles/selftext only (1 request per game, vs ~11).
+# Bump back to a small number (e.g. 3-5) to re-enable a cheaper slice of
+# comment sentiment; `posts[:0]` is an empty slice, so 0 fetches no comments.
+_TIER_A_COMMENT_POSTS = 0
 
 # Wall-clock budget for the per-game loop. Each game runs LLM calls (Haiku
 # ABSA on community text, Haiku/Sonnet news-stance), so on a cold cache the
