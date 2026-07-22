@@ -155,7 +155,18 @@ def _resolve_subreddit_for_game(db, game: dict, resolver: SubredditResolver, loo
         lookup_cache,
     )
     watchlist_id = game.get("watchlist_id")
-    if watchlist_id:
+    # Only PERSIST a real resolution to watchlist.subreddit. A no-match must
+    # NOT be written, because watchlist.subreddit has no TTL: once a game is
+    # stored as '' (no-match), the early-return above skips it forever, so it
+    # never re-resolves even after conditions change. That is exactly how
+    # ~4,014 games got stuck with subreddit='' during the 2026-07-09..07-13
+    # Reddit-blocked/soft-failure window and stopped producing Reddit sentiment
+    # entirely (only 3 games had real subreddits by 2026-07-21). No-matches are
+    # already cached with a 30-day TTL by cached_resolve_subreddit's api_cache
+    # layer, which throttles re-queries without poisoning the watchlist
+    # permanently -- so a no-match now stays NULL here and self-heals on a
+    # later run once that cache entry expires.
+    if watchlist_id and subreddit:
         update_watchlist_subreddit(db, watchlist_id, subreddit)
     return subreddit
 

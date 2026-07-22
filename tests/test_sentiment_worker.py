@@ -260,18 +260,42 @@ def test_no_subreddit_resolved_skips_reddit_source_cleanly(monkeypatch):
     games = [_game("g1", "Elden Ring", "1245620", subreddit=None)]
     steam_reviews = [{"text": "great", "score": 1}]
     written = []
+    subreddit_updates = []
 
     result = _run(
         games=games,
         steam_reviews=steam_reviews,
         subreddit_by_title={},  # resolver finds nothing
         written=written,
+        subreddit_updates=subreddit_updates,
         monkeypatch=monkeypatch,
     )
 
     assert "reddit" not in {w["source"] for w in written}
     assert result["error_count"] == 0
     assert result["reddit_blocked_count"] == 0
+    # A no-match must NOT be persisted to watchlist.subreddit -- persisting it
+    # as '' is the sticky-sentinel bug that froze ~4,014 games out of Reddit
+    # (2026-07-21). No-matches rely on the api_cache's 30-day TTL instead.
+    assert subreddit_updates == []
+
+
+def test_real_subreddit_resolution_is_persisted(monkeypatch):
+    # The complement: a *real* resolution IS written to watchlist.subreddit so
+    # future runs skip re-resolving it.
+    games = [_game("g1", "Elden Ring", "1245620", subreddit=None)]
+    steam_reviews = [{"text": "great", "score": 1}]
+    subreddit_updates = []
+
+    _run(
+        games=games,
+        steam_reviews=steam_reviews,
+        subreddit_by_title={"Elden Ring": "Eldenring"},  # resolver finds it
+        subreddit_updates=subreddit_updates,
+        monkeypatch=monkeypatch,
+    )
+
+    assert subreddit_updates == [("w-g1", "Eldenring")]
 
 
 def test_game_with_zero_data_across_all_sources_is_skipped(monkeypatch):
