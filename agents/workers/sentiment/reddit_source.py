@@ -692,7 +692,14 @@ def build_subreddit_resolver() -> SubredditResolver:
 # Subreddit resolution with 30-day cache
 # ---------------------------------------------------------------------------
 
-_LOOKUP_TTL_HOURS = 24 * 30
+# Subreddit-resolution cache lifetime. Real matches also persist permanently
+# in watchlist.subreddit (so they never re-resolve); this TTL only governs how
+# often a *no-match* game is re-checked. A game with no subreddit almost never
+# gains one, so re-resolving all ~3,400 no-match games monthly was mostly
+# wasted ScrapeOps spend -- bumped 30d -> 90d (2026-07-22) to cut that
+# re-resolution cost ~3x and keep monthly Reddit proxy usage under budget,
+# while still eventually self-healing if a game does get a community.
+_LOOKUP_TTL_HOURS = 24 * 90
 
 
 def cached_resolve_subreddit(
