@@ -197,6 +197,40 @@ def _norm_full(title: str) -> str:
     return " ".join(t.split())
 
 
+# A suffix containing any of these denotes a genuinely DIFFERENT product (a
+# remaster / re-release / remake with its own player base and store presence),
+# NOT a repackaged edition of the base game. A base-title cluster member whose
+# suffix-over-base contains one of these is never auto-collapsed by the edition
+# promotion -- it stays active and is reported for manual review instead. This
+# is the line between "Tekken 8: Deluxe Edition" (collapse) and "Horizon Zero
+# Dawn Remastered" / "Grand Theft Auto V Enhanced" (keep).
+_REMASTER_CLASS_TOKENS = {
+    "remaster",
+    "remastered",
+    "remake",
+    "remakes",
+    "enhanced",
+    "definitive",
+    "legacy",
+    "anniversary",
+    "redux",
+    "reloaded",
+    "reforged",
+    "reawakened",
+    "reborn",
+}
+
+
+def _suffix_tokens(title, base):
+    """Tokens present in the full normalized title but not in its base title.
+
+    e.g. ("Tekken 8: Deluxe Edition", "tekken 8") -> {"deluxe", "edition"}.
+    Used to classify a variant as a pure edition vs. a remaster/re-release.
+    """
+    base_toks = set(base.split())
+    return {t for t in _norm_full(title).split() if t not in base_toks}
+
+
 def compute_plan(games, watchlist, covered):
     """Return (auto_map, review_appid, review_base).
 
@@ -265,26 +299,82 @@ def compute_plan(games, watchlist, covered):
     return auto_map, review_appid, review_base
 
 
-def _print_plan(auto_map, review_appid, review_base, show_review):
-    by_canonical = defaultdict(list)
-    for canonical, variant in auto_map:
-        by_canonical[canonical["game_id"]].append((canonical, variant))
+def compute_edition_promotions(review_base, covered):
+    """Refine the base-title-only review tier into promotable editions vs. leftovers.
 
+    Returns (edition_map, leftover_base).
+
+    edition_map:   list of (canonical, variant) — pure editions/seasons of a base
+                   game that IS present in the cluster, safe to collapse even
+                   though they don't share the base's steam_app_id (a different
+                   store SKU of the same underlying game).
+    leftover_base: [(base, rows)] clusters left untouched — either no bare base
+                   row is present (all members are DLC/editions with no base to
+                   anchor on), or the remaining members are remaster-class
+                   re-releases (distinct products).
+
+    Safety rules:
+      * only act on a cluster that contains a BARE base row (a member whose full
+        normalized title == the base title) — that's the strong signal this is a
+        real base game with editions, not a pile of standalone DLC.
+      * a variant is promoted only if its suffix-over-base contains NO
+        remaster-class token; otherwise it's kept active and reported.
+    """
+    edition_map = []
+    leftover_base = []
+    for base, rows in review_base:
+        bare_rows = [g for g in rows if _norm_full(g["title"]) == base]
+        if not bare_rows:
+            leftover_base.append((base, rows))  # no base game to anchor on
+            continue
+        canonical = _pick_canonical(bare_rows, covered)
+        promoted_any = False
+        kept = []
+        for g in rows:
+            if g["game_id"] == canonical["game_id"]:
+                continue
+            if _suffix_tokens(g["title"], base) & _REMASTER_CLASS_TOKENS:
+                kept.append(g)  # remaster/re-release — distinct product
+            else:
+                edition_map.append((canonical, g))
+                promoted_any = True
+        # surface the canonical + any kept remaster rows so a reviewer sees what
+        # was left behind in a cluster we partially touched
+        if kept:
+            leftover_base.append((base, [canonical] + kept))
+        elif not promoted_any:
+            leftover_base.append((base, rows))
+    return edition_map, leftover_base
+
+
+def _print_tier(pairs, label):
+    """Print an (canonical, variant) collapse tier grouped by canonical."""
+    by_canonical = defaultdict(list)
+    for canonical, variant in pairs:
+        by_canonical[canonical["game_id"]].append((canonical, variant))
+    print(
+        f"{len(by_canonical)} canonical game(s) absorb {len(pairs)} variant row(s) "
+        f"to deactivate.\n"
+    )
+    for gid, entries in sorted(by_canonical.items(), key=lambda kv: -len(kv[1])):
+        canonical = entries[0][0]
+        print(f"  KEEP  {canonical['title']}  (app {canonical.get('steam_app_id')})")
+        for _, variant in entries:
+            print(f"    x-  {variant['title']}")
+    print()
+
+
+def _print_plan(auto_map, review_appid, edition_map, leftover_base, show_review):
     print("=" * 78)
     print("CONSERVATIVE TIER (auto-apply with --apply): shared steam_app_id + same base title")
     print("=" * 78)
-    print(
-        f"{len(by_canonical)} canonical game(s) absorb {len(auto_map)} variant row(s) "
-        f"to deactivate.\n"
-    )
-    for gid, pairs in sorted(
-        by_canonical.items(), key=lambda kv: -len(kv[1])
-    ):
-        canonical = pairs[0][0]
-        print(f"  KEEP  {canonical['title']}  (app {canonical.get('steam_app_id')})")
-        for _, variant in pairs:
-            print(f"    x-  {variant['title']}")
-    print()
+    _print_tier(auto_map, "conservative")
+
+    print("=" * 78)
+    print("EDITION-PROMOTION TIER (auto-apply with --apply-editions): same base title, "
+          "pure edition/season of a base row present in the cluster")
+    print("=" * 78)
+    _print_tier(edition_map, "edition")
 
     print("-" * 78)
     print(f"REVIEW ONLY — shared steam_app_id but MULTIPLE base titles "
@@ -300,11 +390,12 @@ def _print_plan(auto_map, review_appid, review_base, show_review):
     print()
 
     print("-" * 78)
-    print(f"REVIEW ONLY — same base title, no shared steam_app_id "
-          f"({len(review_base)} cluster(s), possible distinct remaster/spinoff — NOT auto-applied)")
+    print(f"REVIEW ONLY — base-title clusters left untouched "
+          f"({len(leftover_base)} cluster(s): remaster/re-release, or no base row "
+          f"present — NOT auto-applied)")
     print("-" * 78)
     if show_review:
-        for base, rows in sorted(review_base, key=lambda x: -len(x[1])):
+        for base, rows in sorted(leftover_base, key=lambda x: -len(x[1])):
             print(f"  [{base}] {len(rows)} rows: {[g['title'] for g in rows][:6]}")
     else:
         print("  (re-run with --show-review to list these in full)")
@@ -338,12 +429,18 @@ def main(argv=None):
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Perform the conservative-tier deactivations (default is dry-run).",
+        help="Perform the CONSERVATIVE-tier deactivations (default is dry-run).",
+    )
+    parser.add_argument(
+        "--apply-editions",
+        action="store_true",
+        help="Perform the EDITION-PROMOTION-tier deactivations (base-title-only "
+             "editions of a present base game). Separate opt-in from --apply.",
     )
     parser.add_argument(
         "--show-review",
         action="store_true",
-        help="List the two review-only tiers in full.",
+        help="List the review-only tiers in full.",
     )
     args = parser.parse_args(argv)
 
@@ -356,17 +453,25 @@ def main(argv=None):
           f"{len(covered)} games with data coverage.\n")
 
     auto_map, review_appid, review_base = compute_plan(games, watchlist, covered)
-    _print_plan(auto_map, review_appid, review_base, args.show_review)
+    edition_map, leftover_base = compute_edition_promotions(review_base, covered)
+    _print_plan(auto_map, review_appid, edition_map, leftover_base, args.show_review)
 
-    if not args.apply:
-        print("DRY-RUN — no writes. Re-run with --apply to deactivate the "
-              "conservative-tier variants above.")
+    if not args.apply and not args.apply_editions:
+        print("DRY-RUN — no writes. Re-run with --apply (conservative tier) "
+              "and/or --apply-editions (edition-promotion tier) to deactivate.")
         return
 
-    print("APPLYING conservative-tier deactivations...")
-    mapped, deactivated = _apply(client, auto_map, watchlist)
-    print(f"Done: set canonical_game_id on {mapped} game(s), "
-          f"deactivated {deactivated} watchlist row(s).")
+    if args.apply:
+        print("APPLYING conservative-tier deactivations...")
+        mapped, deactivated = _apply(client, auto_map, watchlist)
+        print(f"  conservative: set canonical_game_id on {mapped} game(s), "
+              f"deactivated {deactivated} watchlist row(s).")
+
+    if args.apply_editions:
+        print("APPLYING edition-promotion-tier deactivations...")
+        mapped, deactivated = _apply(client, edition_map, watchlist)
+        print(f"  editions: set canonical_game_id on {mapped} game(s), "
+              f"deactivated {deactivated} watchlist row(s).")
 
 
 if __name__ == "__main__":

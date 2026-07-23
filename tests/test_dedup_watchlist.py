@@ -15,7 +15,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from scripts.dedup_watchlist import normalize_base_title, compute_plan
+from scripts.dedup_watchlist import (
+    normalize_base_title,
+    compute_plan,
+    compute_edition_promotions,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -148,3 +152,82 @@ def test_prefers_bare_title_as_canonical():
     canonical, variant = auto[0]
     assert canonical["game_id"] == "bare"
     assert variant["game_id"] == "edi"
+
+
+# --------------------------------------------------------------------------- #
+# compute_edition_promotions (base-title-only tier)
+# --------------------------------------------------------------------------- #
+
+def test_promotes_pure_editions_with_bare_base_present():
+    # different app_ids (base-title-only tier); pure editions collapse into base
+    review_base = [
+        (
+            "tekken 8",
+            [
+                _game("t8", "Tekken 8", "1778820"),
+                _game("t8d", "Tekken 8: Deluxe Edition", "1778821"),
+                _game("t8u", "Tekken 8: Ultimate Edition", "1778822"),
+            ],
+        )
+    ]
+    edition_map, leftover = compute_edition_promotions(review_base, covered={"t8"})
+
+    variant_ids = {v["game_id"] for _, v in edition_map}
+    canonical_ids = {c["game_id"] for c, _ in edition_map}
+    assert variant_ids == {"t8d", "t8u"}
+    assert canonical_ids == {"t8"}
+    assert leftover == []  # nothing left behind
+
+
+def test_keeps_remaster_class_rereleases():
+    review_base = [
+        (
+            "horizon zero dawn",
+            [
+                _game("hzd", "Horizon Zero Dawn", "1151640"),
+                _game("hzdc", "Horizon Zero Dawn: Collector's Edition", "1151641"),
+                _game("hzdr", "Horizon Zero Dawn Remastered", "2561580"),
+            ],
+        )
+    ]
+    edition_map, leftover = compute_edition_promotions(review_base, covered=set())
+
+    variant_ids = {v["game_id"] for _, v in edition_map}
+    assert variant_ids == {"hzdc"}          # edition collapses
+    # the remaster is kept and surfaced in leftover alongside the canonical
+    leftover_titles = {g["title"] for _, rows in leftover for g in rows}
+    assert "Horizon Zero Dawn Remastered" in leftover_titles
+
+
+def test_skips_cluster_with_no_bare_base_row():
+    # all members are standalone DLC packs; no base game present -> untouched
+    review_base = [
+        (
+            "taiko no tatsujin rhythm festival anime",
+            [
+                _game("a1", "Taiko no Tatsujin: Rhythm Festival - Anime Pack Vol. 1", "1"),
+                _game("a2", "Taiko no Tatsujin: Rhythm Festival - Anime Pack Vol. 2", "2"),
+            ],
+        )
+    ]
+    edition_map, leftover = compute_edition_promotions(review_base, covered=set())
+
+    assert edition_map == []
+    assert len(leftover) == 1
+
+
+def test_gta_enhanced_and_legacy_not_collapsed():
+    review_base = [
+        (
+            "grand theft auto v",
+            [
+                _game("gta", "Grand Theft Auto V", "271590"),
+                _game("gtae", "Grand Theft Auto V Enhanced", "3240220"),
+                _game("gtal", "Grand Theft Auto V Legacy", "271591"),
+            ],
+        )
+    ]
+    edition_map, leftover = compute_edition_promotions(review_base, covered=set())
+
+    assert edition_map == []  # both variants are remaster-class -> kept
+    assert len(leftover) == 1
