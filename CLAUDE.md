@@ -183,6 +183,13 @@ Scans four sources for watchlist candidates not yet tracked and writes `watchlis
 - Every DB/API touch point in `worker.py`'s `run()` is an injectable `<verb>_fn` (tests use plain fakes, zero live calls) and each of the 3 sources is wrapped independently so one source failing (or one bad candidate within a source) degrades to a logged error rather than crashing the run.
 - Not yet exercised against live Supabase/Steam/IGDB/EDGAR/Reddit — built and fully unit-tested, but running it writes real rows to production `games`/`studios`/`watchlist_proposals`, so that's a deliberate follow-up step rather than done automatically.
 
+### Watchlist bloat-reduction maintenance scripts (`scripts/`)
+A family of one-off, **dry-run-by-default** maintenance scripts that shrank the seed/RAWG-era `games`/`watchlist` set from **4,017 → 1,098 active rows (~73%)** across four passes (2026-07-22..24; see `tasks.md`'s "Reduce watchlist/game-list bloat" section for the full applied log). All share the same safety model: **soft-deactivation only** (`watchlist.active = false`, never `DELETE`), each pass tagged in `watchlist.deactivated_reason` (migration `018`) so it is individually reversible via one scoped `update watchlist set active=true where deactivated_reason='<pass>'`, and dedup variants mapped to their canonical base row via `games.canonical_game_id` (migration `017`). Every script mirrors `rawg_backfill.py`'s dry-run/`--apply` convention and has pure, table-free compute functions with unit tests (`tests/test_{dedup_watchlist,deactivate_dead_games,fix_mismapped_app_ids,rebackfill_nulled_app_ids}.py`).
+- **`dedup_watchlist.py`** — collapses edition/season variants of the *same* game into one canonical row. `--apply` = conservative tier (shared `steam_app_id` + same normalized base title, 296 rows); `--apply-editions` = base-title-only editions with a bare base row present and no remaster-class token in the suffix (217 rows — so "Tekken 8: Deluxe" collapses but "Horizon Zero Dawn Remastered"/"GTA V Enhanced" stay). Tag `edition_dedup`.
+- **`deactivate_dead_games.py`** — `--apply-dead` deactivates active games with **zero** `player_metrics` + `sentiment_snapshots` + `patch_events` **and** no `steam_app_id` (no path to signal — seed-era console/mobile/DLC SKUs; 1,667 rows). Rows that are a canonical for an edition cluster, or that unexpectedly have a `steam_app_id`, are held for review, never auto-deactivated. Tag `dead_no_coverage`.
+- **`fix_mismapped_app_ids.py`** — a `steam_app_id` maps to exactly one Steam app, so a shared one is wrong beyond one owner. `--apply-dlc` collapses clean base+own-DLC clusters (400 rows, tag `dlc_dedup`). `--apply-mismap` resolves each app_id's TRUE name via the **bulk Steam catalog map** (`steam_client._app_name_map()` — per-app storefront `appdetails` tarpits at scale, ~2 lookups/10min), keeps the member matching that name, and **deactivates + NULLs the wrong `steam_app_id`** on every foreign row so it stops reporting another game's CCU (349 rows, tag `mismapped_app_id`); clusters whose app is absent from the catalog (delisted) are skipped, never guessed.
+- **`rebackfill_nulled_app_ids.py`** — `--apply` recovers the *correct* app_id for `mismapped_app_id`-nulled rows by **exact normalized-name match against the Steam catalog** (the nulled rows' `rawg_slug` is also corrupt from the same bad match, so it's cleared rather than trusted), gated on a unique match, an unused app_id, and no active same-base sibling — then reactivates the row (10 real base games recovered, e.g. Gundam Breaker 4, Lost Judgment). The ~339 with no standalone Steam entry stay correctly inactive.
+
 ### External data caching design
 `docs/supabase_reddit_cache.md` specifies a generic `api_cache` table (`source TEXT, key TEXT, payload JSONB, fetched_at TIMESTAMPTZ`) that backs Tier-2 source adapters. The table schema and TTL semantics are documented there; apply migrations before running volatile-source collectors.
 
@@ -225,6 +232,8 @@ pip install -r requirements.txt
 # database/migrations/014_dashboard_briefing_read_policy.sql
 # database/migrations/015_dashboard_trade_plan_read_policies.sql
 # database/migrations/016_ccu_snapshots.sql
+# database/migrations/017_games_canonical_game_id.sql
+# database/migrations/018_watchlist_deactivation_reason.sql
 
 # Run the watchlist seeding agent (one-time, idempotent)
 python agents/orchestrator/seed_watchlist.py
